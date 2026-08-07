@@ -12,6 +12,7 @@ local status_expiry = 0
 local suggestion_data = nil
 local suggestions_generated = false
 local apply_report = "Run Generate Suggestions to enable apply."
+local operation_done_msg = ""
 
 local selected_track_guid = nil
 local selected_track_role = nil
@@ -437,14 +438,21 @@ function M.loop()
           end
           if ok then
             set_status("Auto EQ applied")
+            operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
           else
             set_status(summary or "Apply failed")
+            operation_done_msg = "Operation finished with issues: " .. os.date("%H:%M:%S")
           end
         end
       end
     else
       reaper.ImGui_Spacing(ctx)
       reaper.ImGui_TextDisabled(ctx, "Run Generate Suggestions to enable Apply.")
+    end
+
+    if operation_done_msg ~= "" then
+      reaper.ImGui_Spacing(ctx)
+      reaper.ImGui_Text(ctx, operation_done_msg)
     end
 
     draw_bottom_row_controls()

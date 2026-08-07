@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.11.0
+-- @version 0.13.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.11.0",
+  version = "0.13.0",
   install_source_dir = "",
   track_roles = {},
 }
@@ -312,6 +312,142 @@ local function apply_named_profile(track, fx_idx)
   return applied
 end
 
+local function contains_all_words(haystack, words)
+  local lower = (haystack or ""):lower()
+  for _, w in ipairs(words) do
+    if not lower:find(w:lower(), 1, true) then
+      return false
+    end
+  end
+  return true
+end
+
+local function find_param_index(track, fx_idx, words)
+  local count = reaper.TrackFX_GetNumParams(track, fx_idx)
+  for i = 0, count - 1 do
+    local ok, name = reaper.TrackFX_GetParamName(track, fx_idx, i, "")
+    if ok and contains_all_words(name, words) then
+      return i
+    end
+  end
+  return nil
+end
+
+local function normalize_param_value(kind, value)
+  if kind == "frequency" then
+    local hz = math.max(20, math.min(24000, value))
+    local min_hz = 20
+    local max_hz = 24000
+    return (math.log(hz) - math.log(min_hz)) / (math.log(max_hz) - math.log(min_hz))
+  end
+  if kind == "gain" then
+    local db = math.max(-24, math.min(24, value))
+    return (db + 24) / 48
+  end
+  if kind == "q" then
+    local q = math.max(0.1, math.min(5.0, value))
+    return (q - 0.1) / 4.9
+  end
+  return value
+end
+
+local function set_param_value(track, fx_idx, param_idx, kind, value)
+  local ok, _, min_val, max_val = reaper.TrackFX_GetParamEx(track, fx_idx, param_idx)
+  if not ok then
+    return false
+  end
+  local target = value
+  if max_val <= 1.0001 and min_val >= -0.0001 then
+    target = normalize_param_value(kind, value)
+  end
+  local clamped = math.max(min_val, math.min(max_val, target))
+  return reaper.TrackFX_SetParam(track, fx_idx, param_idx, clamped)
+end
+
+local function set_band_param_by_name(track, fx_idx, band_idx, kind_words, value)
+  local words = { "band", tostring(band_idx) }
+  for _, w in ipairs(kind_words) do
+    words[#words + 1] = w
+  end
+  local param_idx = find_param_index(track, fx_idx, words)
+  if param_idx == nil then
+    return false
+  end
+  return set_param_value(track, fx_idx, param_idx, kind_words[1], value)
+end
+
+local function set_band_enabled(track, fx_idx, band_idx, enabled)
+  local key = string.format("BANDENABLED%d", band_idx - 1)
+  local val = enabled and 1 or 0
+  if try_set_named_param(track, fx_idx, key, val) then
+    return true
+  end
+  return set_band_param_by_name(track, fx_idx, band_idx, { "enable" }, val)
+end
+
+local function set_band_type(track, fx_idx, band_idx, band_type)
+  local key = string.format("BANDTYPE%d", band_idx - 1)
+  if try_set_named_param(track, fx_idx, key, band_type) then
+    return true
+  end
+  return false
+end
+
+local function collect_rule_moves(rule)
+  local moves = {}
+
+  local function push_if_present(gain_key, freq_key, band_type)
+    local gain = rule[gain_key]
+    local freq = rule[freq_key]
+    if type(gain) == "number" and type(freq) == "number" then
+      moves[#moves + 1] = {
+        gain = gain,
+        freq = freq,
+        q = 1.0,
+        band_type = band_type or "Band",
+      }
+    end
+  end
+
+  push_if_present("low_shelf_boost_db", "low_shelf_hz", "LowShelf")
+  push_if_present("low_cut_db", "low_cut_hz", "Band")
+  push_if_present("mud_cut_db", "mud_cut_hz", "Band")
+  push_if_present("punch_boost_db", "punch_hz", "Band")
+  push_if_present("boxy_cut_db", "boxy_hz", "Band")
+  push_if_present("presence_boost_db", "presence_hz", "Band")
+  push_if_present("definition_boost_db", "definition_hz", "Band")
+  push_if_present("air_boost_db", "air_hz", "HighShelf")
+  push_if_present("fizz_cut_db", "fizz_hz", "Band")
+
+  return moves
+end
+
+local function apply_rule_curve(track, fx_idx, rule)
+  local writes = 0
+
+  if set_band_enabled(track, fx_idx, 1, true) then writes = writes + 1 end
+  if set_band_type(track, fx_idx, 1, "HP") then writes = writes + 1 end
+  if set_band_param_by_name(track, fx_idx, 1, { "frequency" }, rule.hpf_hz or 80) then writes = writes + 1 end
+  if set_band_param_by_name(track, fx_idx, 1, { "q" }, 0.707) then writes = writes + 1 end
+
+  local moves = collect_rule_moves(rule)
+  for i = 1, 3 do
+    local band_idx = i + 1
+    local move = moves[i]
+    if move then
+      if set_band_enabled(track, fx_idx, band_idx, true) then writes = writes + 1 end
+      if set_band_type(track, fx_idx, band_idx, move.band_type) then writes = writes + 1 end
+      if set_band_param_by_name(track, fx_idx, band_idx, { "frequency" }, move.freq) then writes = writes + 1 end
+      if set_band_param_by_name(track, fx_idx, band_idx, { "gain" }, move.gain) then writes = writes + 1 end
+      if set_band_param_by_name(track, fx_idx, band_idx, { "q" }, move.q or 1.0) then writes = writes + 1 end
+    else
+      if set_band_enabled(track, fx_idx, band_idx, false) then writes = writes + 1 end
+    end
+  end
+
+  return writes
+end
+
 local function apply_rule_to_track(track, role, strength_pct)
   if not track then
     return false, "Invalid track selection"
@@ -323,11 +459,12 @@ local function apply_rule_to_track(track, role, strength_pct)
     return false, "Could not insert or find ReaEQ"
   end
 
-  local applied = apply_named_profile(track, fx_idx, rule)
+  local applied = apply_named_profile(track, fx_idx)
+  applied = applied + apply_rule_curve(track, fx_idx, rule)
 
   local msg_out = "Inserted/updated ReaEQ for " .. tostring(role) .. "."
   if applied == 0 then
-    msg_out = msg_out .. " Rule summary generated; direct band parameter writes are limited on this Reaper build."
+    msg_out = msg_out .. " Rule summary generated; parameter writes were not accepted on this Reaper build."
   end
   return true, msg_out
 end

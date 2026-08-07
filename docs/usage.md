@@ -16,6 +16,8 @@
 5. Set Suggestion Strength % and click Generate Suggestions
 6. Suggestions are displayed below the matching role column
 7. Apply Auto EQ appears after suggestions are generated
+8. After apply completes, the window shows an "Operation done" status line
+9. Apply writes role-based EQ values with normalized parameter mapping for ReaEQ builds that expose 0..1 params
 
 ## Audio Item Rule
 

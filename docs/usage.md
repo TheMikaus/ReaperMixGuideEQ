@@ -18,6 +18,7 @@
 7. Apply Auto EQ appears after suggestions are generated
 8. After apply completes, the window shows an "Operation done" status line
 9. Apply writes role-based EQ values with normalized parameter mapping for ReaEQ builds that expose 0..1 params
+10. Apply now uses fallback param targeting when exact band-name lookups differ between ReaEQ builds
 
 ## Audio Item Rule
 

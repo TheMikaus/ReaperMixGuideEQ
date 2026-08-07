@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.13.0
+-- @version 0.14.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.13.0",
+  version = "0.14.0",
   install_source_dir = "",
   track_roles = {},
 }
@@ -322,6 +322,16 @@ local function contains_all_words(haystack, words)
   return true
 end
 
+local function contains_any_words(haystack, words)
+  local lower = (haystack or ""):lower()
+  for _, w in ipairs(words) do
+    if lower:find(w:lower(), 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
 local function find_param_index(track, fx_idx, words)
   local count = reaper.TrackFX_GetNumParams(track, fx_idx)
   for i = 0, count - 1 do
@@ -331,6 +341,33 @@ local function find_param_index(track, fx_idx, words)
     end
   end
   return nil
+end
+
+local function find_param_index_loose(track, fx_idx, band_idx, kind_words)
+  local count = reaper.TrackFX_GetNumParams(track, fx_idx)
+  local band_token = tostring(band_idx)
+  for i = 0, count - 1 do
+    local ok, name = reaper.TrackFX_GetParamName(track, fx_idx, i, "")
+    if ok and name then
+      local lower = name:lower()
+      if lower:find(band_token, 1, true) and contains_any_words(lower, kind_words) then
+        return i
+      end
+    end
+  end
+  return nil
+end
+
+local function find_nth_kind_param_index(track, fx_idx, nth, kind_words)
+  local count = reaper.TrackFX_GetNumParams(track, fx_idx)
+  local hits = {}
+  for i = 0, count - 1 do
+    local ok, name = reaper.TrackFX_GetParamName(track, fx_idx, i, "")
+    if ok and contains_any_words(name or "", kind_words) then
+      hits[#hits + 1] = i
+    end
+  end
+  return hits[nth]
 end
 
 local function normalize_param_value(kind, value)
@@ -370,6 +407,12 @@ local function set_band_param_by_name(track, fx_idx, band_idx, kind_words, value
     words[#words + 1] = w
   end
   local param_idx = find_param_index(track, fx_idx, words)
+  if param_idx == nil then
+    param_idx = find_param_index_loose(track, fx_idx, band_idx, kind_words)
+  end
+  if param_idx == nil then
+    param_idx = find_nth_kind_param_index(track, fx_idx, band_idx, kind_words)
+  end
   if param_idx == nil then
     return false
   end

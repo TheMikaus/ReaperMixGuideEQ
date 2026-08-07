@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.3.0
+-- @version 0.11.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,8 +17,9 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.3.0",
+  version = "0.11.0",
   install_source_dir = "",
+  track_roles = {},
 }
 
 local function msg(text)
@@ -63,6 +64,76 @@ local function save_install_source_dir(dir)
   return true
 end
 
+local function get_project_folder_and_name()
+  local _, proj_path = reaper.EnumProjects(-1)
+  if not proj_path or proj_path == "" then
+    return nil, nil
+  end
+
+  local folder = proj_path:match("^(.+[\\/])[^\\/]+$")
+  local name = proj_path:match("^.+[\\/]([^\\/.]+)%.")
+  if not folder or not name then
+    return nil, nil
+  end
+  return folder, name
+end
+
+local function get_project_role_map_path()
+  local folder, name = get_project_folder_and_name()
+  if not folder or not name then
+    return nil
+  end
+  return folder .. name .. ".mixguideeq.roles"
+end
+
+local function save_project_roles()
+  local path = get_project_role_map_path()
+  if not path then
+    return false, "Project must be saved before role assignments can persist."
+  end
+
+  local file = io.open(path, "w")
+  if not file then
+    return false, "Could not write role map file."
+  end
+
+  file:write("# MixGuideEQ role map\n")
+  for guid, role in pairs(app.track_roles) do
+    file:write(tostring(guid) .. "\t" .. tostring(role) .. "\n")
+  end
+  file:close()
+  return true, path
+end
+
+local function load_project_roles()
+  local path = get_project_role_map_path()
+  if not path then
+    return false, ""
+  end
+
+  local file = io.open(path, "r")
+  if not file then
+    return false, path
+  end
+
+  local loaded = {}
+  for line in file:lines() do
+    if line:sub(1, 1) ~= "#" and line ~= "" then
+      local guid, role = line:match("^(.-)\t(.-)$")
+      if guid and role then
+        local normalized = eq_rules.normalize_role(role)
+        if normalized == "drums" or normalized == "guitar" or normalized == "bass" or normalized == "vocals" then
+          loaded[guid] = normalized
+        end
+      end
+    end
+  end
+  file:close()
+
+  app.track_roles = loaded
+  return true, path
+end
+
 local function get_track_name(track, fallback)
   local ok, name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
   if ok and name and name ~= "" then
@@ -71,14 +142,132 @@ local function get_track_name(track, fallback)
   return fallback
 end
 
-local function get_track_names()
-  local out = {}
+local function guess_role_from_name(name)
+  local n = (name or ""):lower()
+  if n:find("vox", 1, true) or n:find("vocal", 1, true) then return "vocals" end
+  if n:find("bass", 1, true) then return "bass" end
+  if n:find("drum", 1, true) or n:find("kick", 1, true) or n:find("snare", 1, true) then return "drums" end
+  if n:find("gtr", 1, true) or n:find("guitar", 1, true) then return "guitar" end
+  return "ignore"
+end
+
+local function get_track_by_guid(guid)
   local count = reaper.CountTracks(0)
   for i = 0, count - 1 do
     local track = reaper.GetTrack(0, i)
-    out[#out + 1] = get_track_name(track, "Track " .. tostring(i + 1))
+    if reaper.GetTrackGUID(track) == guid then
+      return track
+    end
   end
-  return out
+  return nil
+end
+
+local function has_audio_items(track)
+  return reaper.CountTrackMediaItems(track) > 0
+end
+
+local function scan_track_entries()
+  local entries = {}
+  local count = reaper.CountTracks(0)
+  local depth = 0
+  local active_root_name = nil
+  local active_root_role = "ignore"
+
+  for i = 0, count - 1 do
+    local track = reaper.GetTrack(0, i)
+    local guid = reaper.GetTrackGUID(track)
+    local name = get_track_name(track, "Track " .. tostring(i + 1))
+    local folder_delta = math.floor(reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH") or 0)
+    local root_level = depth == 0
+
+    local inferred = "ignore"
+    local display = name
+
+    if root_level then
+      inferred = guess_role_from_name(name)
+      active_root_name = name
+      active_root_role = inferred
+    else
+      display = (active_root_name or "Parent") .. "-" .. name
+      if active_root_role ~= "ignore" then
+        inferred = active_root_role
+      else
+        inferred = guess_role_from_name(name)
+      end
+    end
+
+    if inferred == "ignore" then
+      inferred = "vocals"
+    end
+
+    entries[#entries + 1] = {
+      guid = guid,
+      idx = i,
+      name = name,
+      display_name = display,
+      inferred_role = inferred,
+      has_audio = has_audio_items(track),
+    }
+
+    depth = depth + folder_delta
+    if depth <= 0 then
+      depth = 0
+      active_root_name = nil
+      active_root_role = "ignore"
+    end
+  end
+
+  return entries
+end
+
+local function ensure_track_role_defaults(entries)
+  local seen = {}
+  for _, entry in ipairs(entries) do
+    seen[entry.guid] = true
+    if not app.track_roles[entry.guid] then
+      app.track_roles[entry.guid] = entry.inferred_role
+    end
+  end
+
+  for guid, _ in pairs(app.track_roles) do
+    if not seen[guid] then
+      app.track_roles[guid] = nil
+    end
+  end
+end
+
+local function get_roles_order()
+  return { "drums", "guitar", "bass", "vocals" }
+end
+
+local function build_role_columns()
+  local entries = scan_track_entries()
+  ensure_track_role_defaults(entries)
+
+  local columns = {
+    drums = {},
+    guitar = {},
+    bass = {},
+    vocals = {},
+  }
+
+  for _, entry in ipairs(entries) do
+    local role = app.track_roles[entry.guid] or entry.inferred_role
+    if columns[role] == nil then
+      role = "vocals"
+      app.track_roles[entry.guid] = role
+    end
+
+    columns[role][#columns[role] + 1] = {
+      guid = entry.guid,
+      idx = entry.idx,
+      name = entry.name,
+      display_name = entry.display_name,
+      has_audio = entry.has_audio,
+    }
+  end
+
+  return columns
 end
 
 local function ensure_reaeq(track)
@@ -100,10 +289,9 @@ local function try_set_named_param(track, fx_idx, key, value)
   return ok == true
 end
 
-local function apply_named_profile(track, fx_idx, rule)
+local function apply_named_profile(track, fx_idx)
   local applied = 0
 
-  -- ReaEQ parameter keys vary by build; try common aliases.
   local attempts = {
     { "BANDTYPE0", "HP" },
     { "BANDENABLED0", 1 },
@@ -124,24 +312,7 @@ local function apply_named_profile(track, fx_idx, rule)
   return applied
 end
 
-local function analyze_track(track_idx, role, strength_pct)
-  local track = reaper.GetTrack(0, track_idx)
-  if not track then
-    return false, "Invalid track selection"
-  end
-
-  local count = reaper.CountTrackMediaItems(track)
-  local rule = eq_rules.build_rule_set(role, strength_pct)
-  local lines = {
-    "Track items: " .. tostring(count),
-    eq_rules.render_summary(rule),
-    "Note: spectral FFT analysis will be added in a future pass.",
-  }
-  return true, table.concat(lines, "\n")
-end
-
-local function apply_role_to_track(track_idx, role, strength_pct)
-  local track = reaper.GetTrack(0, track_idx)
+local function apply_rule_to_track(track, role, strength_pct)
   if not track then
     return false, "Invalid track selection"
   end
@@ -153,14 +324,117 @@ local function apply_role_to_track(track_idx, role, strength_pct)
   end
 
   local applied = apply_named_profile(track, fx_idx, rule)
-  reaper.TrackList_AdjustWindows(false)
-  reaper.UpdateArrange()
 
   local msg_out = "Inserted/updated ReaEQ for " .. tostring(role) .. "."
   if applied == 0 then
     msg_out = msg_out .. " Rule summary generated; direct band parameter writes are limited on this Reaper build."
   end
   return true, msg_out
+end
+
+local function build_suggestions(strength_pct)
+  local columns = build_role_columns()
+  local roles = get_roles_order()
+  local rows = {}
+  local total_audio_tracks = 0
+
+  for _, role in ipairs(roles) do
+    local audio_tracks = {}
+    for _, item in ipairs(columns[role]) do
+      if item.has_audio then
+        audio_tracks[#audio_tracks + 1] = item.display_name
+      end
+    end
+    total_audio_tracks = total_audio_tracks + #audio_tracks
+
+    local rule = eq_rules.build_rule_set(role, strength_pct)
+    rows[#rows + 1] = {
+      role = role,
+      audio_track_count = #audio_tracks,
+      audio_tracks = audio_tracks,
+      summary = eq_rules.render_summary(rule),
+      lines = eq_rules.to_lines(rule),
+    }
+  end
+
+  return {
+    columns = columns,
+    rows = rows,
+    total_audio_tracks = total_audio_tracks,
+  }
+end
+
+local function apply_mapped_roles(strength_pct)
+  local columns = build_role_columns()
+  local roles = get_roles_order()
+  local role_track_counts = { drums = 0, guitar = 0, bass = 0, vocals = 0 }
+  local targets = {}
+
+  for _, role in ipairs(roles) do
+    for _, item in ipairs(columns[role]) do
+      if item.has_audio then
+        local track = get_track_by_guid(item.guid)
+        if track then
+          targets[#targets + 1] = { track = track, role = role, label = item.display_name }
+          role_track_counts[role] = role_track_counts[role] + 1
+        end
+      end
+    end
+  end
+
+  if #targets == 0 then
+    return false, "No mapped tracks with audio items were found.", {}
+  end
+
+  local applied_tracks = 0
+  local errors = {}
+
+  reaper.Undo_BeginBlock()
+  for _, target in ipairs(targets) do
+    local ok, err = apply_rule_to_track(target.track, target.role, strength_pct)
+    if ok then
+      applied_tracks = applied_tracks + 1
+    else
+      errors[#errors + 1] = target.label .. ": " .. tostring(err)
+    end
+  end
+  reaper.Undo_EndBlock("MixGuideEQ: Apply mapped Auto EQ", -1)
+
+  reaper.TrackList_AdjustWindows(false)
+  reaper.UpdateArrange()
+
+  local summary = "Applied Auto EQ to " .. tostring(applied_tracks) .. " track(s) with audio."
+  summary = summary
+    .. " D:" .. tostring(role_track_counts.drums)
+    .. " G:" .. tostring(role_track_counts.guitar)
+    .. " B:" .. tostring(role_track_counts.bass)
+    .. " V:" .. tostring(role_track_counts.vocals)
+  if #errors > 0 then
+    summary = summary .. " " .. tostring(#errors) .. " error(s) occurred."
+  end
+
+  return true, summary, errors
+end
+
+local function move_track_to_role(track_guid, role)
+  local normalized = eq_rules.normalize_role(role)
+  local valid = {
+    drums = true,
+    guitar = true,
+    bass = true,
+    vocals = true,
+  }
+
+  if not valid[normalized] then
+    return false, "Invalid role"
+  end
+
+  app.track_roles[track_guid] = normalized
+  local saved, save_info = save_project_roles()
+  if not saved then
+    return true, "Track moved. " .. tostring(save_info)
+  end
+  return true, "Track moved and saved to project map."
 end
 
 local function run_installer()
@@ -194,13 +468,18 @@ local function init()
     app.install_source_dir = normalize_install_dir(get_script_dir())
     save_install_source_dir(app.install_source_dir)
   end
+  load_project_roles()
+  build_role_columns()
 end
 
 local fns = {
-  get_roles = eq_rules.get_role_names,
-  get_track_names = get_track_names,
-  analyze_track = analyze_track,
-  apply_role_to_track = apply_role_to_track,
+  get_roles_order = get_roles_order,
+  list_role_columns = build_role_columns,
+  move_track_to_role = move_track_to_role,
+  build_suggestions = build_suggestions,
+  apply_mapped_roles = apply_mapped_roles,
+  save_project_roles = save_project_roles,
+  load_project_roles = load_project_roles,
   run_installer = run_installer,
   get_install_source_dir = load_install_source_dir,
   set_install_source_dir = save_install_source_dir,

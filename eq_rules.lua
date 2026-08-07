@@ -1,5 +1,13 @@
 local M = {}
 
+local ROLE_ALIASES = {
+  vox = "vocals",
+  vocal = "vocals",
+  voice = "vocals",
+  drum = "drums",
+  gtr = "guitar",
+}
+
 local ROLE_RULES = {
   vocals = {
     summary = "HPF around 80Hz and presence lift around 3kHz.",
@@ -57,8 +65,16 @@ function M.get_role_names()
   return { "vocals", "bass", "drums", "guitar" }
 end
 
+function M.normalize_role(role)
+  local normalized = (role or ""):lower()
+  if ROLE_ALIASES[normalized] then
+    return ROLE_ALIASES[normalized]
+  end
+  return normalized
+end
+
 function M.build_rule_set(role, strength_pct)
-  local normalized_role = (role or ""):lower()
+  local normalized_role = M.normalize_role(role)
   local base = ROLE_RULES[normalized_role] or ROLE_RULES.vocals
   local pct = clamp(tonumber(strength_pct) or 100, 0, 150)
   local strength = pct / 100
@@ -78,6 +94,37 @@ function M.build_rule_set(role, strength_pct)
   end
 
   out.strength_pct = pct
+  return out
+end
+
+function M.to_lines(rule)
+  if not rule then return {} end
+
+  local out = {
+    "HPF: " .. tostring(rule.hpf_hz) .. " Hz",
+  }
+
+  local pairs_out = {
+    { "low_cut_db", "low_cut_hz", "Low cut" },
+    { "mud_cut_db", "mud_cut_hz", "Mud cut" },
+    { "presence_boost_db", "presence_hz", "Presence boost" },
+    { "air_boost_db", "air_hz", "Air boost" },
+    { "punch_boost_db", "punch_hz", "Punch boost" },
+    { "boxy_cut_db", "boxy_hz", "Boxy cut" },
+    { "low_shelf_boost_db", "low_shelf_hz", "Low shelf" },
+    { "definition_boost_db", "definition_hz", "Definition boost" },
+    { "fizz_cut_db", "fizz_hz", "Fizz cut" },
+  }
+
+  for _, entry in ipairs(pairs_out) do
+    local gain_key, freq_key, label = entry[1], entry[2], entry[3]
+    local gain = rule[gain_key]
+    local freq = rule[freq_key]
+    if type(gain) == "number" and type(freq) == "number" then
+      out[#out + 1] = string.format("%s: %.1f dB @ %d Hz", label, gain, freq)
+    end
+  end
+
   return out
 end
 

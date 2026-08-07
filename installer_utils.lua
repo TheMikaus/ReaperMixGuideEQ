@@ -16,11 +16,11 @@ function M.resolve_installer_path(current_dir, saved_dir)
   local normalized_current = normalize_install_dir(current_dir)
   local normalized_saved = normalize_install_dir(saved_dir)
 
-  if normalized_current ~= "" then
-    table.insert(candidates, normalized_current)
-  end
   if normalized_saved ~= "" then
     table.insert(candidates, normalized_saved)
+  end
+  if normalized_current ~= "" then
+    table.insert(candidates, normalized_current)
   end
 
   local seen = {}
@@ -36,10 +36,10 @@ function M.resolve_installer_path(current_dir, saved_dir)
     end
   end
 
-  if normalized_current ~= "" then
-    return normalized_current, normalized_current .. "install.lua"
+  if normalized_saved ~= "" then
+    return normalized_saved, normalized_saved .. "install.lua"
   end
-  return normalized_saved, normalized_saved .. "install.lua"
+  return normalized_current, normalized_current .. "install.lua"
 end
 
 return M

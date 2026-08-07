@@ -15,7 +15,7 @@ def load_lua_runtime():
     return lua
 
 
-def test_prefers_current_script_dir_over_stale_saved_dir():
+def test_prefers_saved_source_dir_for_updates_when_available():
     lua = load_lua_runtime()
     lua.execute(textwrap.dedent(f"""
     local installer_utils = require('installer_utils')
@@ -23,13 +23,16 @@ def test_prefers_current_script_dir_over_stale_saved_dir():
     if current_dir:sub(-1) ~= '/' then
       current_dir = current_dir .. '/'
     end
-    local stale_dir = '{PROJECT_DIR}/tests/'
-    local resolved_dir, resolved_path = installer_utils.resolve_installer_path(current_dir, stale_dir)
-    assert(resolved_dir == current_dir)
-    assert(resolved_path == current_dir .. 'install.lua')
+        local saved_dir = '{PROJECT_DIR}'.gsub('\\\\', '/')
+        if saved_dir:sub(-1) ~= '/' then
+            saved_dir = saved_dir .. '/'
+        end
+        local resolved_dir, resolved_path = installer_utils.resolve_installer_path(current_dir, saved_dir)
+        assert(resolved_dir == saved_dir)
+        assert(resolved_path == saved_dir .. 'install.lua')
     """).strip())
 
 
 if __name__ == '__main__':
-    test_prefers_current_script_dir_over_stale_saved_dir()
+    test_prefers_saved_source_dir_for_updates_when_available()
     print('installer path resolution test passed')

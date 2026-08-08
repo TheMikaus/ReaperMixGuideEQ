@@ -1,4 +1,4 @@
-# MixGuideEQ v0.14.0
+# MixGuideEQ v0.15.0
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -17,6 +17,7 @@ Rule-driven Auto EQ assistant for Reaper.
 11. Apply now writes concrete role-based ReaEQ band settings (HPF + frequency/gain/Q moves)
 12. Fixed normalized parameter mapping so frequency/gain/Q values apply reliably on 0..1 plugin parameter ranges
 13. Added strict and fallback ReaEQ param targeting (band+name, loose match, nth-kind fallback) for better cross-build value writes
+14. Suggestions now show the exact HPF + move set that Apply writes (one-to-one alignment)
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

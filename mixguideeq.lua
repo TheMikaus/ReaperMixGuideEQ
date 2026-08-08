@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.14.0
+-- @version 0.15.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,10 +17,12 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.14.0",
+  version = "0.15.0",
   install_source_dir = "",
   track_roles = {},
 }
+
+local MAX_RULE_MOVES = 3
 
 local function msg(text)
   reaper.ShowConsoleMsg("[MixGuideEQ] " .. tostring(text) .. "\n")
@@ -465,6 +467,28 @@ local function collect_rule_moves(rule)
   return moves
 end
 
+local function render_applied_rule_lines(rule)
+  local out = {
+    "HPF: " .. tostring(rule.hpf_hz or 80) .. " Hz",
+  }
+
+  local moves = collect_rule_moves(rule)
+  local labels = {
+    "Move 1",
+    "Move 2",
+    "Move 3",
+  }
+
+  for i = 1, MAX_RULE_MOVES do
+    local move = moves[i]
+    if move then
+      out[#out + 1] = string.format("%s: %.1f dB @ %d Hz (Q %.2f)", labels[i], move.gain, move.freq, move.q or 1.0)
+    end
+  end
+
+  return out
+end
+
 local function apply_rule_curve(track, fx_idx, rule)
   local writes = 0
 
@@ -474,7 +498,7 @@ local function apply_rule_curve(track, fx_idx, rule)
   if set_band_param_by_name(track, fx_idx, 1, { "q" }, 0.707) then writes = writes + 1 end
 
   local moves = collect_rule_moves(rule)
-  for i = 1, 3 do
+  for i = 1, MAX_RULE_MOVES do
     local band_idx = i + 1
     local move = moves[i]
     if move then
@@ -533,7 +557,7 @@ local function build_suggestions(strength_pct)
       audio_track_count = #audio_tracks,
       audio_tracks = audio_tracks,
       summary = eq_rules.render_summary(rule),
-      lines = eq_rules.to_lines(rule),
+      lines = render_applied_rule_lines(rule),
     }
   end
 

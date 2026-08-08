@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.17.0
+-- @version 0.18.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.17.0",
+  version = "0.18.0",
   install_source_dir = "",
   track_roles = {},
 }
@@ -413,6 +413,27 @@ local function build_band_param_map(track, fx_idx)
     end
   end
 
+  -- Fallback for ReaEQ layouts where band names omit explicit "Band N" tokens.
+  -- ReaEQ commonly exposes first 15 params as 5 bands x (Freq, Gain, BW).
+  if count >= 15 then
+    for band = 1, 5 do
+      out[band] = out[band] or {}
+      local base = (band - 1) * 3
+      if out[band].frequency == nil then
+        out[band].frequency = base
+        log_apply(string.format("fallback map band=%d frequency -> param %d", band, base))
+      end
+      if out[band].gain == nil then
+        out[band].gain = base + 1
+        log_apply(string.format("fallback map band=%d gain -> param %d", band, base + 1))
+      end
+      if out[band].q == nil then
+        out[band].q = base + 2
+        log_apply(string.format("fallback map band=%d q -> param %d", band, base + 2))
+      end
+    end
+  end
+
   return out
 end
 
@@ -435,29 +456,24 @@ local function normalize_param_value(kind, value)
 end
 
 local function set_param_value(track, fx_idx, param_idx, kind, value)
-  local ok, _, min_val, max_val = reaper.TrackFX_GetParamEx(track, fx_idx, param_idx)
-  if not ok then
-    log_apply("set_param_value failed: GetParamEx false for param " .. tostring(param_idx))
-    return false
-  end
   local target = value
   local normalized = false
-  if max_val <= 1.0001 and min_val >= -0.0001 then
+
+  if kind == "frequency" or kind == "gain" or kind == "q" then
     target = normalize_param_value(kind, value)
     normalized = true
   end
-  local clamped = math.max(min_val, math.min(max_val, target))
+
+  local clamped = math.max(0.0, math.min(1.0, target))
   local set_ok = reaper.TrackFX_SetParam(track, fx_idx, param_idx, clamped)
   local read_back = reaper.TrackFX_GetParam(track, fx_idx, param_idx)
   log_apply(string.format(
-    "set_param_value kind=%s param=%d raw=%.5f normalized=%s target=%.5f range=[%.5f, %.5f] write=%s readback=%.5f",
+    "set_param_value kind=%s param=%d raw=%.5f normalized=%s target=%.5f write=%s readback=%.5f",
     tostring(kind),
     param_idx,
     tonumber(value) or -9999,
     tostring(normalized),
     tonumber(clamped) or -9999,
-    tonumber(min_val) or -9999,
-    tonumber(max_val) or -9999,
     tostring(set_ok),
     tonumber(read_back) or -9999
   ))

@@ -22,6 +22,7 @@
 11. Suggestion lines now mirror the exact moves that Apply writes to ReaEQ
 12. Apply targets band parameters using deterministic per-band mapping to avoid cross-band value mismatches
 13. Apply summary now includes the debug log file path for parameter-write diagnostics
+14. ReaEQ layouts without explicit "Band N" labels now use positional fallback mapping for Freq/Gain/BW triplets
 
 ## Audio Item Rule
 

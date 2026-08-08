@@ -51,6 +51,59 @@ local ROLE_RULES = {
   },
 }
 
+local DRUM_SUBTYPE_RULES = {
+  kick = {
+    summary = "Kick: preserve thump and click, reduce boxiness.",
+    hpf_hz = 25,
+    low_shelf_boost_db = 2.5,
+    low_shelf_hz = 70,
+    boxy_cut_db = -2.5,
+    boxy_hz = 350,
+    definition_boost_db = 1.5,
+    definition_hz = 3000,
+  },
+  snare = {
+    summary = "Snare: body in low mids, crack in upper mids.",
+    hpf_hz = 80,
+    punch_boost_db = 2.0,
+    punch_hz = 200,
+    boxy_cut_db = -2.0,
+    boxy_hz = 650,
+    presence_boost_db = 2.0,
+    presence_hz = 3500,
+  },
+  toms = {
+    summary = "Toms: keep weight, reduce mud, add attack.",
+    hpf_hz = 50,
+    punch_boost_db = 2.0,
+    punch_hz = 120,
+    mud_cut_db = -1.5,
+    mud_cut_hz = 300,
+    presence_boost_db = 1.5,
+    presence_hz = 4500,
+  },
+  overheads = {
+    summary = "Overheads: clean lows and shape cymbal brightness.",
+    hpf_hz = 180,
+    mud_cut_db = -1.5,
+    mud_cut_hz = 350,
+    air_boost_db = 1.5,
+    air_hz = 11000,
+    fizz_cut_db = -1.0,
+    fizz_hz = 8000,
+  },
+  room = {
+    summary = "Room: tighten low boom and control harsh cymbal wash.",
+    hpf_hz = 100,
+    mud_cut_db = -2.0,
+    mud_cut_hz = 250,
+    air_boost_db = 1.0,
+    air_hz = 10000,
+    fizz_cut_db = -1.5,
+    fizz_hz = 7000,
+  },
+}
+
 local function clamp(v, min_v, max_v)
   if v < min_v then return min_v end
   if v > max_v then return max_v end
@@ -73,9 +126,42 @@ function M.normalize_role(role)
   return normalized
 end
 
-function M.build_rule_set(role, strength_pct)
+function M.detect_drum_subtype(track_name)
+  local n = (track_name or ""):lower()
+  if n:find("kick", 1, true) or n:find("bd", 1, true) or n:find("kik", 1, true) then return "kick" end
+  if n:find("snare", 1, true) or n:find("sd", 1, true) then return "snare" end
+  if n:find("tom", 1, true) then return "toms" end
+  if n:find("overhead", 1, true) or n:find("oh", 1, true) or n:find("cym", 1, true) then return "overheads" end
+  if n:find("room", 1, true) then return "room" end
+  return nil
+end
+
+local function merge_rule(base, overrides)
+  local merged = {}
+  for k, v in pairs(base) do
+    merged[k] = v
+  end
+  if overrides then
+    for k, v in pairs(overrides) do
+      merged[k] = v
+    end
+  end
+  return merged
+end
+
+function M.build_rule_set(role, strength_pct, context)
   local normalized_role = M.normalize_role(role)
   local base = ROLE_RULES[normalized_role] or ROLE_RULES.vocals
+  local drum_subtype = nil
+
+  if normalized_role == "drums" then
+    local track_name = context and (context.track_name or context.track_label)
+    drum_subtype = M.detect_drum_subtype(track_name)
+    if drum_subtype and DRUM_SUBTYPE_RULES[drum_subtype] then
+      base = merge_rule(base, DRUM_SUBTYPE_RULES[drum_subtype])
+    end
+  end
+
   local pct = clamp(tonumber(strength_pct) or 100, 0, 150)
   local strength = pct / 100
 
@@ -91,6 +177,11 @@ function M.build_rule_set(role, strength_pct)
     elseif out[k] == nil then
       out[k] = v
     end
+  end
+
+  if drum_subtype then
+    out.drum_subtype = drum_subtype
+    out.summary = tostring(out.summary or "") .. " Drum subtype: " .. drum_subtype .. "."
   end
 
   out.strength_pct = pct

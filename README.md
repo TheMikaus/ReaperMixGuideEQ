@@ -1,4 +1,4 @@
-# MixGuideEQ v0.22.0
+# MixGuideEQ v0.23.0
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -25,6 +25,8 @@ Rule-driven Auto EQ assistant for Reaper.
 19. Fixed ReaEQ named config key indexing (BANDTYPE/BANDENABLED now target correct band numbers)
 20. Added fallback for ReaEQ variants that reject named band config: recreate default ReaEQ and apply by default slot layout
 21. Added per-track Include/Exclude control; excluded tracks are ignored by suggestion counts and Auto EQ apply
+22. Added drum-subtype heuristics (kick, snare, toms, overheads, room) for per-track drum EQ decisions
+23. Hardened apply lifecycle so Undo begin/end always close cleanly even on runtime errors
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

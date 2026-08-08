@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.22.0
+-- @version 0.23.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.22.0",
+  version = "0.23.0",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
@@ -689,13 +689,16 @@ local function apply_rule_curve_default_layout(track, fx_idx, rule)
   return writes
 end
 
-local function apply_rule_to_track(track, role, strength_pct)
+local function apply_rule_to_track(track, role, strength_pct, track_label)
   if not track then
     return false, "Invalid track selection"
   end
 
-  local rule = eq_rules.build_rule_set(role, strength_pct)
   local _, track_name = reaper.GetTrackName(track)
+  local rule = eq_rules.build_rule_set(role, strength_pct, {
+    track_name = track_name,
+    track_label = track_label,
+  })
   log_apply("apply_rule_to_track role=" .. tostring(role) .. " strength=" .. tostring(strength_pct) .. " track=" .. tostring(track_name))
   local fx_idx = ensure_reaeq(track)
   if not fx_idx or fx_idx < 0 then
@@ -739,23 +742,44 @@ local function build_suggestions(strength_pct)
   for _, role in ipairs(roles) do
     local audio_tracks = {}
     local excluded_tracks = {}
+    local drum_subtype_counts = {}
     for _, item in ipairs(columns[role]) do
       if item.excluded then
         excluded_tracks[#excluded_tracks + 1] = item.display_name
       elseif item.has_audio then
         audio_tracks[#audio_tracks + 1] = item.display_name
+        if role == "drums" and eq_rules.detect_drum_subtype then
+          local subtype = eq_rules.detect_drum_subtype(item.name or item.display_name)
+          if subtype then
+            drum_subtype_counts[subtype] = (drum_subtype_counts[subtype] or 0) + 1
+          end
+        end
       end
     end
     total_audio_tracks = total_audio_tracks + #audio_tracks
 
     local rule = eq_rules.build_rule_set(role, strength_pct)
+    local summary = eq_rules.render_summary(rule)
+    if role == "drums" then
+      local parts = {}
+      for _, subtype in ipairs({ "kick", "snare", "toms", "overheads", "room" }) do
+        local count = drum_subtype_counts[subtype] or 0
+        if count > 0 then
+          parts[#parts + 1] = subtype .. ": " .. tostring(count)
+        end
+      end
+      if #parts > 0 then
+        summary = summary .. "\nDrum subtype tracks: " .. table.concat(parts, ", ")
+      end
+    end
+
     rows[#rows + 1] = {
       role = role,
       audio_track_count = #audio_tracks,
       audio_tracks = audio_tracks,
       excluded_track_count = #excluded_tracks,
       excluded_tracks = excluded_tracks,
-      summary = eq_rules.render_summary(rule),
+      summary = summary,
       lines = render_applied_rule_lines(rule),
     }
   end
@@ -799,17 +823,24 @@ local function apply_mapped_roles(strength_pct)
   local errors = {}
 
   reaper.Undo_BeginBlock()
-  for _, target in ipairs(targets) do
-    log_apply("target begin role=" .. tostring(target.role) .. " label=" .. tostring(target.label))
-    local ok, err = apply_rule_to_track(target.track, target.role, strength_pct)
-    if ok then
-      applied_tracks = applied_tracks + 1
-    else
-      errors[#errors + 1] = target.label .. ": " .. tostring(err)
-      log_apply("target error label=" .. tostring(target.label) .. " err=" .. tostring(err))
+  local apply_ok, apply_err = pcall(function()
+    for _, target in ipairs(targets) do
+      log_apply("target begin role=" .. tostring(target.role) .. " label=" .. tostring(target.label))
+      local ok, err = apply_rule_to_track(target.track, target.role, strength_pct, target.label)
+      if ok then
+        applied_tracks = applied_tracks + 1
+      else
+        errors[#errors + 1] = target.label .. ": " .. tostring(err)
+        log_apply("target error label=" .. tostring(target.label) .. " err=" .. tostring(err))
+      end
     end
-  end
+  end)
   reaper.Undo_EndBlock("MixGuideEQ: Apply mapped Auto EQ", -1)
+
+  if not apply_ok then
+    errors[#errors + 1] = "Runtime apply error: " .. tostring(apply_err)
+    log_apply("apply runtime error: " .. tostring(apply_err))
+  end
 
   reaper.TrackList_AdjustWindows(false)
   reaper.UpdateArrange()

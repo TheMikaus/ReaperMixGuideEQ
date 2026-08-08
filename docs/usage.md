@@ -27,6 +27,8 @@
 16. ReaEQ BANDTYPE/BANDENABLED named config writes now use 1-based band key indexing
 17. If named band config writes are unsupported, Apply rebuilds ReaEQ and writes to default slot layout (band5 HPF, band2/3/4 moves)
 18. Selected tracks can be toggled Include/Exclude from EQ; excluded tracks are ignored by suggestions and apply
+19. Drum tracks now use subtype-aware heuristics (kick/snare/toms/overheads/room) when names match subtype keywords
+20. Apply execution now protects Undo begin/end lifecycle with guaranteed close behavior
 
 ## Audio Item Rule
 

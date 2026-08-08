@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.20.0
+-- @version 0.21.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.20.0",
+  version = "0.21.0",
   install_source_dir = "",
   track_roles = {},
 }
@@ -323,10 +323,21 @@ local function ensure_reaeq(track)
   return reaper.TrackFX_AddByName(track, "ReaEQ", false, 1)
 end
 
+local function recreate_reaeq(track, old_fx_idx)
+  if old_fx_idx and old_fx_idx >= 0 then
+    reaper.TrackFX_Delete(track, old_fx_idx)
+  end
+  return ensure_reaeq(track)
+end
+
 local function try_set_named_param(track, fx_idx, key, value)
   if not reaper.TrackFX_SetNamedConfigParm then return false end
   local ok = reaper.TrackFX_SetNamedConfigParm(track, fx_idx, key, tostring(value))
   return ok == true
+end
+
+local function supports_named_band_config(track, fx_idx)
+  return try_set_named_param(track, fx_idx, "BANDTYPE1", BAND_TYPE_CODE.Band)
 end
 
 local function apply_named_profile(track, fx_idx)
@@ -636,6 +647,29 @@ local function apply_rule_curve(track, fx_idx, rule)
   return writes
 end
 
+local function apply_rule_curve_default_layout(track, fx_idx, rule)
+  local writes = 0
+
+  -- Default ReaEQ layout slots:
+  -- band 2/3: bell-like moves, band 4: high shelf, band 5: high-pass.
+  if set_band_param_by_name(track, fx_idx, 5, { "frequency" }, rule.hpf_hz or 80) then writes = writes + 1 end
+  if set_band_param_by_name(track, fx_idx, 5, { "q" }, 0.707) then writes = writes + 1 end
+
+  local moves = collect_rule_moves(rule)
+  local move_bands = { 2, 3, 4 }
+  for i = 1, MAX_RULE_MOVES do
+    local move = moves[i]
+    if move then
+      local band_idx = move_bands[i]
+      if set_band_param_by_name(track, fx_idx, band_idx, { "frequency" }, move.freq) then writes = writes + 1 end
+      if set_band_param_by_name(track, fx_idx, band_idx, { "gain" }, move.gain) then writes = writes + 1 end
+      if set_band_param_by_name(track, fx_idx, band_idx, { "q" }, move.q or 1.0) then writes = writes + 1 end
+    end
+  end
+
+  return writes
+end
+
 local function apply_rule_to_track(track, role, strength_pct)
   if not track then
     return false, "Invalid track selection"
@@ -652,8 +686,22 @@ local function apply_rule_to_track(track, role, strength_pct)
   log_apply("ensure_reaeq fx_idx=" .. tostring(fx_idx) .. " track=" .. tostring(track_name))
   dump_fx_params(track, fx_idx)
 
-  local applied = apply_named_profile(track, fx_idx)
-  applied = applied + apply_rule_curve(track, fx_idx, rule)
+  local applied = 0
+  if supports_named_band_config(track, fx_idx) then
+    log_apply("named band config supported; using band type/enable path")
+    applied = apply_named_profile(track, fx_idx)
+    applied = applied + apply_rule_curve(track, fx_idx, rule)
+  else
+    log_apply("named band config unsupported; recreating ReaEQ and using default-layout path")
+    fx_idx = recreate_reaeq(track, fx_idx)
+    if not fx_idx or fx_idx < 0 then
+      log_apply("recreate_reaeq failed for track=" .. tostring(track_name))
+      return false, "Could not recreate ReaEQ for fallback apply"
+    end
+    log_apply("fallback ensure_reaeq fx_idx=" .. tostring(fx_idx) .. " track=" .. tostring(track_name))
+    dump_fx_params(track, fx_idx)
+    applied = apply_rule_curve_default_layout(track, fx_idx, rule)
+  end
   log_apply("apply_rule_to_track writes=" .. tostring(applied) .. " track=" .. tostring(track_name))
 
   local msg_out = "Inserted/updated ReaEQ for " .. tostring(role) .. "."

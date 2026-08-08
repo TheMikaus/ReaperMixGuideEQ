@@ -25,6 +25,7 @@
 14. ReaEQ layouts without explicit "Band N" labels now use positional fallback mapping for Freq/Gain/BW triplets
 15. ReaEQ band filter types now write via numeric BANDTYPE codes for reliable HP/Bell/Shelf assignment
 16. ReaEQ BANDTYPE/BANDENABLED named config writes now use 1-based band key indexing
+17. If named band config writes are unsupported, Apply rebuilds ReaEQ and writes to default slot layout (band5 HPF, band2/3/4 moves)
 
 ## Audio Item Rule
 

@@ -21,6 +21,7 @@
 10. Apply now uses fallback param targeting when exact band-name lookups differ between ReaEQ builds
 11. Suggestion lines now mirror the exact moves that Apply writes to ReaEQ
 12. Apply targets band parameters using deterministic per-band mapping to avoid cross-band value mismatches
+13. Apply summary now includes the debug log file path for parameter-write diagnostics
 
 ## Audio Item Rule
 

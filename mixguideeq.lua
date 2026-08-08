@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.16.0
+-- @version 0.17.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,12 +17,39 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.16.0",
+  version = "0.17.0",
   install_source_dir = "",
   track_roles = {},
 }
 
 local MAX_RULE_MOVES = 3
+local DEBUG_APPLY_LOG = true
+
+local function get_debug_log_path()
+  local dir = reaper.GetResourcePath() .. "/Scripts/MixGuideEQ"
+  reaper.RecursiveCreateDirectory(dir, 0)
+  return dir .. "/mixguideeq_apply_debug.log"
+end
+
+local function append_log(line)
+  local file = io.open(get_debug_log_path(), "a")
+  if not file then return end
+  file:write(line .. "\n")
+  file:close()
+end
+
+local function clear_apply_log()
+  local file = io.open(get_debug_log_path(), "w")
+  if not file then return end
+  file:write("=== MixGuideEQ Apply Debug Log ===\n")
+  file:close()
+end
+
+local function log_apply(msg_text)
+  if not DEBUG_APPLY_LOG then return end
+  local line = "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] " .. tostring(msg_text)
+  append_log(line)
+end
 
 local function msg(text)
   reaper.ShowConsoleMsg("[MixGuideEQ] " .. tostring(text) .. "\n")
@@ -356,6 +383,7 @@ end
 local function build_band_param_map(track, fx_idx)
   local count = reaper.TrackFX_GetNumParams(track, fx_idx)
   local out = {}
+  log_apply("build_band_param_map param_count=" .. tostring(count))
 
   for i = 0, count - 1 do
     local ok, name = reaper.TrackFX_GetParamName(track, fx_idx, i, "")
@@ -367,14 +395,19 @@ local function build_band_param_map(track, fx_idx)
 
         if contains_any_words(lower, { "frequency", "freq" }) and out[band].frequency == nil then
           out[band].frequency = i
+          log_apply(string.format("map band=%d frequency -> param %d (%s)", band, i, tostring(name)))
         elseif contains_any_words(lower, { "gain" }) and out[band].gain == nil then
           out[band].gain = i
+          log_apply(string.format("map band=%d gain -> param %d (%s)", band, i, tostring(name)))
         elseif contains_any_words(lower, { "q", "bandwidth", "bw" }) and out[band].q == nil then
           out[band].q = i
+          log_apply(string.format("map band=%d q -> param %d (%s)", band, i, tostring(name)))
         elseif contains_any_words(lower, { "enable", "enabled" }) and out[band].enable == nil then
           out[band].enable = i
+          log_apply(string.format("map band=%d enable -> param %d (%s)", band, i, tostring(name)))
         elseif contains_any_words(lower, { "type" }) and out[band].type == nil then
           out[band].type = i
+          log_apply(string.format("map band=%d type -> param %d (%s)", band, i, tostring(name)))
         end
       end
     end
@@ -404,14 +437,31 @@ end
 local function set_param_value(track, fx_idx, param_idx, kind, value)
   local ok, _, min_val, max_val = reaper.TrackFX_GetParamEx(track, fx_idx, param_idx)
   if not ok then
+    log_apply("set_param_value failed: GetParamEx false for param " .. tostring(param_idx))
     return false
   end
   local target = value
+  local normalized = false
   if max_val <= 1.0001 and min_val >= -0.0001 then
     target = normalize_param_value(kind, value)
+    normalized = true
   end
   local clamped = math.max(min_val, math.min(max_val, target))
-  return reaper.TrackFX_SetParam(track, fx_idx, param_idx, clamped)
+  local set_ok = reaper.TrackFX_SetParam(track, fx_idx, param_idx, clamped)
+  local read_back = reaper.TrackFX_GetParam(track, fx_idx, param_idx)
+  log_apply(string.format(
+    "set_param_value kind=%s param=%d raw=%.5f normalized=%s target=%.5f range=[%.5f, %.5f] write=%s readback=%.5f",
+    tostring(kind),
+    param_idx,
+    tonumber(value) or -9999,
+    tostring(normalized),
+    tonumber(clamped) or -9999,
+    tonumber(min_val) or -9999,
+    tonumber(max_val) or -9999,
+    tostring(set_ok),
+    tonumber(read_back) or -9999
+  ))
+  return set_ok
 end
 
 local function set_band_param_by_name(track, fx_idx, band_idx, kind_words, value)
@@ -420,6 +470,7 @@ local function set_band_param_by_name(track, fx_idx, band_idx, kind_words, value
   local band_map = build_band_param_map(track, fx_idx)
   local band_entry = band_map[band_idx]
   if band_entry and band_entry[kind_key] ~= nil then
+    log_apply(string.format("set_band_param_by_name direct-map band=%d kind=%s param=%d value=%.5f", band_idx, kind_key, band_entry[kind_key], tonumber(value) or -9999))
     return set_param_value(track, fx_idx, band_entry[kind_key], kind_key, value)
   end
 
@@ -430,9 +481,31 @@ local function set_band_param_by_name(track, fx_idx, band_idx, kind_words, value
 
   local param_idx = find_param_index(track, fx_idx, words)
   if param_idx == nil then
+    log_apply(string.format("set_band_param_by_name failed to resolve band=%d kind=%s", band_idx, kind_key))
     return false
   end
+  log_apply(string.format("set_band_param_by_name strict-search band=%d kind=%s param=%d value=%.5f", band_idx, kind_key, param_idx, tonumber(value) or -9999))
   return set_param_value(track, fx_idx, param_idx, kind_key, value)
+end
+
+local function dump_fx_params(track, fx_idx)
+  local count = reaper.TrackFX_GetNumParams(track, fx_idx)
+  log_apply("dump_fx_params count=" .. tostring(count))
+  for i = 0, count - 1 do
+    local ok_name, name = reaper.TrackFX_GetParamName(track, fx_idx, i, "")
+    local ok_ex, _, min_val, max_val = reaper.TrackFX_GetParamEx(track, fx_idx, i)
+    local cur = reaper.TrackFX_GetParam(track, fx_idx, i)
+    log_apply(string.format(
+      "param[%d] name=%s ok_name=%s ok_ex=%s min=%.5f max=%.5f cur=%.5f",
+      i,
+      tostring(name),
+      tostring(ok_name),
+      tostring(ok_ex),
+      tonumber(min_val) or -9999,
+      tonumber(max_val) or -9999,
+      tonumber(cur) or -9999
+    ))
+  end
 end
 
 local function set_band_enabled(track, fx_idx, band_idx, enabled)
@@ -535,13 +608,19 @@ local function apply_rule_to_track(track, role, strength_pct)
   end
 
   local rule = eq_rules.build_rule_set(role, strength_pct)
+  local _, track_name = reaper.GetTrackName(track)
+  log_apply("apply_rule_to_track role=" .. tostring(role) .. " strength=" .. tostring(strength_pct) .. " track=" .. tostring(track_name))
   local fx_idx = ensure_reaeq(track)
   if not fx_idx or fx_idx < 0 then
+    log_apply("ensure_reaeq failed for track=" .. tostring(track_name))
     return false, "Could not insert or find ReaEQ"
   end
+  log_apply("ensure_reaeq fx_idx=" .. tostring(fx_idx) .. " track=" .. tostring(track_name))
+  dump_fx_params(track, fx_idx)
 
   local applied = apply_named_profile(track, fx_idx)
   applied = applied + apply_rule_curve(track, fx_idx, rule)
+  log_apply("apply_rule_to_track writes=" .. tostring(applied) .. " track=" .. tostring(track_name))
 
   local msg_out = "Inserted/updated ReaEQ for " .. tostring(role) .. "."
   if applied == 0 then
@@ -583,6 +662,8 @@ local function build_suggestions(strength_pct)
 end
 
 local function apply_mapped_roles(strength_pct)
+  clear_apply_log()
+  log_apply("apply_mapped_roles begin strength=" .. tostring(strength_pct))
   local columns = build_role_columns()
   local roles = get_roles_order()
   local role_track_counts = { drums = 0, guitar = 0, bass = 0, vocals = 0 }
@@ -601,6 +682,7 @@ local function apply_mapped_roles(strength_pct)
   end
 
   if #targets == 0 then
+    log_apply("apply_mapped_roles no targets with audio")
     return false, "No mapped tracks with audio items were found.", {}
   end
 
@@ -609,11 +691,13 @@ local function apply_mapped_roles(strength_pct)
 
   reaper.Undo_BeginBlock()
   for _, target in ipairs(targets) do
+    log_apply("target begin role=" .. tostring(target.role) .. " label=" .. tostring(target.label))
     local ok, err = apply_rule_to_track(target.track, target.role, strength_pct)
     if ok then
       applied_tracks = applied_tracks + 1
     else
       errors[#errors + 1] = target.label .. ": " .. tostring(err)
+      log_apply("target error label=" .. tostring(target.label) .. " err=" .. tostring(err))
     end
   end
   reaper.Undo_EndBlock("MixGuideEQ: Apply mapped Auto EQ", -1)
@@ -630,6 +714,9 @@ local function apply_mapped_roles(strength_pct)
   if #errors > 0 then
     summary = summary .. " " .. tostring(#errors) .. " error(s) occurred."
   end
+
+  summary = summary .. " Debug log: " .. get_debug_log_path()
+  log_apply("apply_mapped_roles done summary=" .. summary)
 
   return true, summary, errors
 end

@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.15.0
+-- @version 0.16.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.15.0",
+  version = "0.16.0",
   install_source_dir = "",
   track_roles = {},
 }
@@ -345,31 +345,42 @@ local function find_param_index(track, fx_idx, words)
   return nil
 end
 
-local function find_param_index_loose(track, fx_idx, band_idx, kind_words)
+local function parse_band_index_from_name(lower_name)
+  local n = lower_name:match("band%s*(%d+)")
+  if n then return tonumber(n) end
+  n = lower_name:match("(%d+)%s*band")
+  if n then return tonumber(n) end
+  return nil
+end
+
+local function build_band_param_map(track, fx_idx)
   local count = reaper.TrackFX_GetNumParams(track, fx_idx)
-  local band_token = tostring(band_idx)
+  local out = {}
+
   for i = 0, count - 1 do
     local ok, name = reaper.TrackFX_GetParamName(track, fx_idx, i, "")
     if ok and name then
       local lower = name:lower()
-      if lower:find(band_token, 1, true) and contains_any_words(lower, kind_words) then
-        return i
+      local band = parse_band_index_from_name(lower)
+      if band then
+        out[band] = out[band] or {}
+
+        if contains_any_words(lower, { "frequency", "freq" }) and out[band].frequency == nil then
+          out[band].frequency = i
+        elseif contains_any_words(lower, { "gain" }) and out[band].gain == nil then
+          out[band].gain = i
+        elseif contains_any_words(lower, { "q", "bandwidth", "bw" }) and out[band].q == nil then
+          out[band].q = i
+        elseif contains_any_words(lower, { "enable", "enabled" }) and out[band].enable == nil then
+          out[band].enable = i
+        elseif contains_any_words(lower, { "type" }) and out[band].type == nil then
+          out[band].type = i
+        end
       end
     end
   end
-  return nil
-end
 
-local function find_nth_kind_param_index(track, fx_idx, nth, kind_words)
-  local count = reaper.TrackFX_GetNumParams(track, fx_idx)
-  local hits = {}
-  for i = 0, count - 1 do
-    local ok, name = reaper.TrackFX_GetParamName(track, fx_idx, i, "")
-    if ok and contains_any_words(name or "", kind_words) then
-      hits[#hits + 1] = i
-    end
-  end
-  return hits[nth]
+  return out
 end
 
 local function normalize_param_value(kind, value)
@@ -404,21 +415,24 @@ local function set_param_value(track, fx_idx, param_idx, kind, value)
 end
 
 local function set_band_param_by_name(track, fx_idx, band_idx, kind_words, value)
+  local kind_key = kind_words[1]
+
+  local band_map = build_band_param_map(track, fx_idx)
+  local band_entry = band_map[band_idx]
+  if band_entry and band_entry[kind_key] ~= nil then
+    return set_param_value(track, fx_idx, band_entry[kind_key], kind_key, value)
+  end
+
   local words = { "band", tostring(band_idx) }
   for _, w in ipairs(kind_words) do
     words[#words + 1] = w
   end
+
   local param_idx = find_param_index(track, fx_idx, words)
-  if param_idx == nil then
-    param_idx = find_param_index_loose(track, fx_idx, band_idx, kind_words)
-  end
-  if param_idx == nil then
-    param_idx = find_nth_kind_param_index(track, fx_idx, band_idx, kind_words)
-  end
   if param_idx == nil then
     return false
   end
-  return set_param_value(track, fx_idx, param_idx, kind_words[1], value)
+  return set_param_value(track, fx_idx, param_idx, kind_key, value)
 end
 
 local function set_band_enabled(track, fx_idx, band_idx, enabled)

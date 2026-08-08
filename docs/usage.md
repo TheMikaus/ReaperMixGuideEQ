@@ -20,6 +20,7 @@
 9. Apply writes role-based EQ values with normalized parameter mapping for ReaEQ builds that expose 0..1 params
 10. Apply now uses fallback param targeting when exact band-name lookups differ between ReaEQ builds
 11. Suggestion lines now mirror the exact moves that Apply writes to ReaEQ
+12. Apply targets band parameters using deterministic per-band mapping to avoid cross-band value mismatches
 
 ## Audio Item Rule
 

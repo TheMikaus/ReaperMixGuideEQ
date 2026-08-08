@@ -26,6 +26,7 @@
 15. ReaEQ band filter types now write via numeric BANDTYPE codes for reliable HP/Bell/Shelf assignment
 16. ReaEQ BANDTYPE/BANDENABLED named config writes now use 1-based band key indexing
 17. If named band config writes are unsupported, Apply rebuilds ReaEQ and writes to default slot layout (band5 HPF, band2/3/4 moves)
+18. Selected tracks can be toggled Include/Exclude from EQ; excluded tracks are ignored by suggestions and apply
 
 ## Audio Item Rule
 
@@ -41,6 +42,7 @@
 
 - Track-to-column assignments are saved per project in:
 	- {project folder}/{project name}.mixguideeq.roles
+- Exclude/include state is saved in the same role map file
 - Move operations auto-save when the project is saved.
 - Use Save Project Map and Reload Project Map on the bottom-left of the window for manual control.
 

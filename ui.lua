@@ -119,6 +119,9 @@ local function draw_track_column(role, items, width, height)
 
     for _, item in ipairs(items) do
       local suffix = item.has_audio and "" or " [no audio]"
+      if item.excluded then
+        suffix = suffix .. " [excluded]"
+      end
       local label = item.display_name .. suffix .. "##" .. item.guid
       local is_selected = selected_track_guid == item.guid
       if reaper.APIExists("ImGui_Selectable") then
@@ -132,6 +135,19 @@ local function draw_track_column(role, items, width, height)
       end
     end
   end)
+end
+
+local function find_selected_item(columns)
+  if not selected_track_guid then return nil end
+  local roles = get_roles()
+  for _, role in ipairs(roles) do
+    for _, item in ipairs(columns[role] or {}) do
+      if item.guid == selected_track_guid then
+        return item
+      end
+    end
+  end
+  return nil
 end
 
 local function draw_track_columns(columns)
@@ -175,6 +191,9 @@ local function draw_suggestion_column(role, width, height)
     end
 
     reaper.ImGui_Text(ctx, tostring(row_data.audio_track_count) .. " audio track(s)")
+    if (row_data.excluded_track_count or 0) > 0 then
+      reaper.ImGui_TextDisabled(ctx, tostring(row_data.excluded_track_count) .. " excluded track(s)")
+    end
     reaper.ImGui_TextWrapped(ctx, row_data.summary)
     for _, line in ipairs(row_data.lines or {}) do
       reaper.ImGui_TextDisabled(ctx, "- " .. line)
@@ -199,11 +218,13 @@ local function draw_suggestion_columns()
   end
 end
 
-local function draw_move_controls()
+local function draw_move_controls(columns)
   if not selected_track_guid then
     reaper.ImGui_TextDisabled(ctx, "Select a track in any column to move it.")
     return
   end
+
+  local selected_item = find_selected_item(columns)
 
   reaper.ImGui_Text(ctx, "Move selected track to:")
   local roles = get_roles()
@@ -223,6 +244,27 @@ local function draw_move_controls()
     end
   end
   reaper.ImGui_NewLine(ctx)
+
+  local is_excluded = selected_item and selected_item.excluded == true
+  local toggle_label = is_excluded and "Include In EQ" or "Exclude From EQ"
+  if reaper.ImGui_Button(ctx, toggle_label, 140, 0) then
+    if fns and fns.set_track_excluded then
+      local ok, msg = fns.set_track_excluded(selected_track_guid, not is_excluded)
+      if ok then
+        suggestions_generated = false
+      end
+      set_status(msg or "Track exclusion updated")
+    end
+  end
+
+  if selected_item then
+    reaper.ImGui_SameLine(ctx)
+    if is_excluded then
+      reaper.ImGui_TextDisabled(ctx, "This track is excluded from suggestions and apply")
+    else
+      reaper.ImGui_TextDisabled(ctx, "This track is included in suggestions and apply")
+    end
+  end
 end
 
 local function draw_bottom_row_controls()
@@ -417,7 +459,7 @@ function M.loop()
     draw_track_columns(columns)
 
     reaper.ImGui_Spacing(ctx)
-    draw_move_controls()
+    draw_move_controls(columns)
 
     reaper.ImGui_Separator(ctx)
     reaper.ImGui_TextWrapped(ctx, "Suggestions by role (displayed below matching columns).")

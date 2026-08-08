@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.21.0
+-- @version 0.22.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,9 +17,10 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.21.0",
+  version = "0.22.0",
   install_source_dir = "",
   track_roles = {},
+  track_excluded = {},
 }
 
 local MAX_RULE_MOVES = 3
@@ -139,7 +140,8 @@ local function save_project_roles()
 
   file:write("# MixGuideEQ role map\n")
   for guid, role in pairs(app.track_roles) do
-    file:write(tostring(guid) .. "\t" .. tostring(role) .. "\n")
+    local excluded = app.track_excluded[guid] == true and "1" or "0"
+    file:write(tostring(guid) .. "\t" .. tostring(role) .. "\t" .. excluded .. "\n")
   end
   file:close()
   return true, path
@@ -156,21 +158,28 @@ local function load_project_roles()
     return false, path
   end
 
-  local loaded = {}
+  local loaded_roles = {}
+  local loaded_excluded = {}
   for line in file:lines() do
     if line:sub(1, 1) ~= "#" and line ~= "" then
-      local guid, role = line:match("^(.-)\t(.-)$")
+      local guid, role, excluded = line:match("^(.-)\t(.-)\t(.-)$")
+      if not guid then
+        guid, role = line:match("^(.-)\t(.-)$")
+        excluded = "0"
+      end
       if guid and role then
         local normalized = eq_rules.normalize_role(role)
         if normalized == "drums" or normalized == "guitar" or normalized == "bass" or normalized == "vocals" then
-          loaded[guid] = normalized
+          loaded_roles[guid] = normalized
+          loaded_excluded[guid] = (tostring(excluded) == "1" or tostring(excluded):lower() == "true")
         end
       end
     end
   end
   file:close()
 
-  app.track_roles = loaded
+  app.track_roles = loaded_roles
+  app.track_excluded = loaded_excluded
   return true, path
 end
 
@@ -267,11 +276,20 @@ local function ensure_track_role_defaults(entries)
     if not app.track_roles[entry.guid] then
       app.track_roles[entry.guid] = entry.inferred_role
     end
+    if app.track_excluded[entry.guid] == nil then
+      app.track_excluded[entry.guid] = false
+    end
   end
 
   for guid, _ in pairs(app.track_roles) do
     if not seen[guid] then
       app.track_roles[guid] = nil
+    end
+  end
+
+  for guid, _ in pairs(app.track_excluded) do
+    if not seen[guid] then
+      app.track_excluded[guid] = nil
     end
   end
 end
@@ -304,6 +322,7 @@ local function build_role_columns()
       name = entry.name,
       display_name = entry.display_name,
       has_audio = entry.has_audio,
+      excluded = app.track_excluded[entry.guid] == true,
     }
   end
 
@@ -719,8 +738,11 @@ local function build_suggestions(strength_pct)
 
   for _, role in ipairs(roles) do
     local audio_tracks = {}
+    local excluded_tracks = {}
     for _, item in ipairs(columns[role]) do
-      if item.has_audio then
+      if item.excluded then
+        excluded_tracks[#excluded_tracks + 1] = item.display_name
+      elseif item.has_audio then
         audio_tracks[#audio_tracks + 1] = item.display_name
       end
     end
@@ -731,6 +753,8 @@ local function build_suggestions(strength_pct)
       role = role,
       audio_track_count = #audio_tracks,
       audio_tracks = audio_tracks,
+      excluded_track_count = #excluded_tracks,
+      excluded_tracks = excluded_tracks,
       summary = eq_rules.render_summary(rule),
       lines = render_applied_rule_lines(rule),
     }
@@ -750,10 +774,13 @@ local function apply_mapped_roles(strength_pct)
   local roles = get_roles_order()
   local role_track_counts = { drums = 0, guitar = 0, bass = 0, vocals = 0 }
   local targets = {}
+  local excluded_audio_tracks = 0
 
   for _, role in ipairs(roles) do
     for _, item in ipairs(columns[role]) do
-      if item.has_audio then
+      if item.excluded and item.has_audio then
+        excluded_audio_tracks = excluded_audio_tracks + 1
+      elseif item.has_audio then
         local track = get_track_by_guid(item.guid)
         if track then
           targets[#targets + 1] = { track = track, role = role, label = item.display_name }
@@ -788,6 +815,9 @@ local function apply_mapped_roles(strength_pct)
   reaper.UpdateArrange()
 
   local summary = "Applied Auto EQ to " .. tostring(applied_tracks) .. " track(s) with audio."
+  if excluded_audio_tracks > 0 then
+    summary = summary .. " Excluded: " .. tostring(excluded_audio_tracks) .. "."
+  end
   summary = summary
     .. " D:" .. tostring(role_track_counts.drums)
     .. " G:" .. tostring(role_track_counts.guitar)
@@ -822,6 +852,23 @@ local function move_track_to_role(track_guid, role)
     return true, "Track moved. " .. tostring(save_info)
   end
   return true, "Track moved and saved to project map."
+end
+
+local function set_track_excluded(track_guid, excluded)
+  if not track_guid or track_guid == "" then
+    return false, "Invalid track"
+  end
+
+  app.track_excluded[track_guid] = excluded == true
+  local saved, save_info = save_project_roles()
+  if not saved then
+    return true, "Exclusion updated. " .. tostring(save_info)
+  end
+
+  if excluded then
+    return true, "Track excluded from EQ calculations and apply."
+  end
+  return true, "Track included in EQ calculations and apply."
 end
 
 local function run_installer()
@@ -863,6 +910,7 @@ local fns = {
   get_roles_order = get_roles_order,
   list_role_columns = build_role_columns,
   move_track_to_role = move_track_to_role,
+  set_track_excluded = set_track_excluded,
   build_suggestions = build_suggestions,
   apply_mapped_roles = apply_mapped_roles,
   save_project_roles = save_project_roles,

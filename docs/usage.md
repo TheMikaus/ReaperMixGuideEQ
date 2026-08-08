@@ -29,6 +29,14 @@
 18. Selected tracks can be toggled Include/Exclude from EQ; excluded tracks are ignored by suggestions and apply
 19. Drum tracks now use subtype-aware heuristics (kick/snare/toms/overheads/room) when names match subtype keywords
 20. Apply execution now protects Undo begin/end lifecycle with guaranteed close behavior
+21. Analyze Frequency generates a read-only per-track report (metrics + suggested moves) and does not change EQ
+22. Frequency report is shown as role-based analysis cards (not a raw linear list)
+23. Analyze Frequency UI path now uses guarded layout calls for better ImGui compatibility stability
+24. Generate Suggestions is available only after Analyze Frequency has run
+25. Results area is tabbed (Analysis first, Suggestions second) to avoid panel overgrowth
+26. Analyze button is on the Analysis tab; Generate Suggestions button is on the Suggestions tab
+27. Frequency and suggestion cards are taller for easier per-track review
+28. Suggestions prefer analysis-informed recommendation lines when frequency analysis data exists
 
 ## Audio Item Rule
 

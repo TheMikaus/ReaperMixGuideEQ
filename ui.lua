@@ -12,6 +12,8 @@ local status_expiry = 0
 local suggestion_data = nil
 local suggestions_generated = false
 local apply_report = "Run Generate Suggestions to enable apply."
+local freq_report = nil
+local active_results_tab = "analysis"
 local operation_done_msg = ""
 
 local selected_track_guid = nil
@@ -26,6 +28,21 @@ local HAS_SETCURSOR_API = reaper.APIExists("ImGui_SetCursorPosX") and reaper.API
 local function set_status(msg)
   status_msg = msg
   status_expiry = reaper.time_precise() + 3.0
+end
+
+local function has_valid_ctx()
+  if not ctx then
+    return false
+  end
+  if reaper.ImGui_ValidatePtr then
+    local ok, valid = pcall(function()
+      return reaper.ImGui_ValidatePtr(ctx, "ImGui_Context*")
+    end)
+    if ok then
+      return valid == true
+    end
+  end
+  return true
 end
 
 local function title_role(role)
@@ -82,6 +99,16 @@ local function begin_child_any(label, width, height)
   return false, false
 end
 
+local function safe_same_line()
+  if not has_valid_ctx() then
+    return false
+  end
+  local ok = pcall(function()
+    reaper.ImGui_SameLine(ctx)
+  end)
+  return ok
+end
+
 local function safe_draw_child(label, width, height, draw_fn)
   local started, opened = begin_child_any(label, width, height)
   if not started then
@@ -102,13 +129,53 @@ local function safe_draw_child(label, width, height, draw_fn)
 end
 
 local function refresh_suggestions()
+  if not freq_report then
+    suggestions_generated = false
+    set_status("Run Analyze Frequency before generating suggestions")
+    return
+  end
+
   if fns and fns.build_suggestions then
     suggestion_data = fns.build_suggestions(strength_pct)
     suggestions_generated = true
+    active_results_tab = "suggestions"
     set_status("Suggestions generated")
   else
     suggestion_data = nil
     suggestions_generated = false
+  end
+end
+
+local function refresh_frequency_report()
+  if fns and fns.analyze_frequency_report then
+    local ok, report = fns.analyze_frequency_report(strength_pct)
+    if ok then
+      freq_report = report
+      suggestions_generated = false
+      active_results_tab = "analysis"
+      set_status("Frequency analysis complete")
+    else
+      freq_report = nil
+      set_status("Frequency analysis failed")
+    end
+  else
+    freq_report = nil
+    set_status("Frequency analysis unavailable")
+  end
+end
+
+local function draw_results_tabs()
+  if reaper.ImGui_Button(ctx, "Analysis", 100, 0) then
+    active_results_tab = "analysis"
+  end
+
+  safe_same_line()
+  if freq_report then
+    if reaper.ImGui_Button(ctx, "Suggestions", 110, 0) then
+      active_results_tab = "suggestions"
+    end
+  else
+    reaper.ImGui_TextDisabled(ctx, "Suggestions (Analyze first)")
   end
 end
 
@@ -162,7 +229,7 @@ local function draw_track_columns(columns)
   for idx, role in ipairs(roles) do
     draw_track_column(role, columns[role] or {}, width, height)
     if idx < #roles then
-      reaper.ImGui_SameLine(ctx)
+      safe_same_line()
     end
   end
 end
@@ -208,12 +275,91 @@ local function draw_suggestion_columns()
   local total_spacing = spacing * (#roles - 1)
   local width = (avail_x - total_spacing) / #roles
   if width < 180 then width = 180 end
-  local height = math.max(220, math.min(380, math.floor(avail_y * 0.55)))
+  local height = math.max(280, math.min(460, math.floor(avail_y * 0.68)))
 
   for idx, role in ipairs(roles) do
     draw_suggestion_column(role, width, height)
     if idx < #roles then
-      reaper.ImGui_SameLine(ctx)
+      safe_same_line()
+    end
+  end
+end
+
+local function draw_frequency_report()
+  if not freq_report then
+    return
+  end
+
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_Text(ctx, "Frequency Analysis Report (read-only)")
+  reaper.ImGui_TextWrapped(ctx, tostring(freq_report.summary or ""))
+  reaper.ImGui_Spacing(ctx)
+
+  local roles = get_roles()
+  local row_by_role = {}
+  for _, role_row in ipairs(freq_report.rows or {}) do
+    row_by_role[role_row.role] = role_row
+  end
+
+  local avail_x, avail_y = reaper.ImGui_GetContentRegionAvail(ctx)
+  local spacing = 8
+  local total_spacing = spacing * (#roles - 1)
+  local width = (avail_x - total_spacing) / #roles
+  if width < 180 then width = 180 end
+  local height = math.max(260, math.min(420, math.floor(avail_y * 0.62)))
+
+  for idx, role in ipairs(roles) do
+    local role_row = row_by_role[role] or {
+      role = role,
+      analyzed_track_count = 0,
+      excluded_track_count = 0,
+      skipped_track_count = 0,
+      tracks = {},
+    }
+
+    safe_draw_child(role .. "##freq_column", width, height, function()
+      reaper.ImGui_Text(ctx, title_role(role) .. " Analysis")
+      reaper.ImGui_Separator(ctx)
+      reaper.ImGui_TextDisabled(ctx,
+        "Analyzed " .. tostring(role_row.analyzed_track_count or 0)
+        .. " | Excluded " .. tostring(role_row.excluded_track_count or 0)
+        .. " | Skipped " .. tostring(role_row.skipped_track_count or 0)
+      )
+
+      if not role_row.tracks or #role_row.tracks == 0 then
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_TextDisabled(ctx, "No analyzed tracks in this role")
+        return
+      end
+
+      for _, t in ipairs(role_row.tracks) do
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_Separator(ctx)
+        reaper.ImGui_Text(ctx, tostring(t.name or "Track"))
+
+        if t.metrics then
+          reaper.ImGui_TextDisabled(ctx, string.format(
+            "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
+            tonumber(t.metrics.avg_rms) or 0,
+            tonumber(t.metrics.mud_ratio) or 0,
+            tonumber(t.metrics.presence_ratio) or 0,
+            tonumber(t.metrics.brightness_ratio) or 0
+          ))
+        else
+          reaper.ImGui_TextDisabled(ctx, tostring(t.summary or "No metrics"))
+        end
+
+        local rec_shown = 0
+        for _, rec in ipairs(t.recommendations or {}) do
+          if rec_shown >= 2 then break end
+          reaper.ImGui_TextDisabled(ctx, "- " .. tostring(rec))
+          rec_shown = rec_shown + 1
+        end
+      end
+    end)
+
+    if idx < #roles then
+      safe_same_line()
     end
   end
 end
@@ -240,7 +386,7 @@ local function draw_move_controls(columns)
           set_status(move_msg or "Could not move track")
         end
       end
-      reaper.ImGui_SameLine(ctx)
+      safe_same_line()
     end
   end
   reaper.ImGui_NewLine(ctx)
@@ -258,7 +404,7 @@ local function draw_move_controls(columns)
   end
 
   if selected_item then
-    reaper.ImGui_SameLine(ctx)
+    safe_same_line()
     if is_excluded then
       reaper.ImGui_TextDisabled(ctx, "This track is excluded from suggestions and apply")
     else
@@ -273,7 +419,7 @@ local function draw_bottom_row_controls()
       local ok, info = fns and fns.save_project_roles and fns.save_project_roles()
       if ok then set_status("Project map saved") else set_status(info or "Could not save project map") end
     end
-    reaper.ImGui_SameLine(ctx)
+    safe_same_line()
     if reaper.ImGui_Button(ctx, "Reload Project Map", 145, 0) then
       local ok = fns and fns.load_project_roles and fns.load_project_roles()
       if ok then
@@ -284,7 +430,7 @@ local function draw_bottom_row_controls()
       end
     end
 
-    reaper.ImGui_SameLine(ctx)
+    safe_same_line()
     if reaper.ImGui_Button(ctx, "Install/Update", 120, 0) then
       if HAS_POPUP_MODAL_API then
         request_open_update_popup = true
@@ -307,7 +453,7 @@ local function draw_bottom_row_controls()
     if ok then set_status("Project map saved") else set_status(info or "Could not save project map") end
   end
 
-  reaper.ImGui_SameLine(ctx)
+  safe_same_line()
   if reaper.ImGui_Button(ctx, "Reload Project Map", 145, 0) then
     local ok = fns and fns.load_project_roles and fns.load_project_roles()
     if ok then
@@ -357,7 +503,7 @@ local function draw_update_popup()
       end
     end
 
-    reaper.ImGui_SameLine(ctx)
+    safe_same_line()
     if reaper.ImGui_Button(ctx, "Update##inline", 90, 0) then
       local launched = fns and fns.run_installer and fns.run_installer()
       if launched then
@@ -368,7 +514,7 @@ local function draw_update_popup()
       end
     end
 
-    reaper.ImGui_SameLine(ctx)
+    safe_same_line()
     if reaper.ImGui_Button(ctx, "Hide##inline", 90, 0) then
       show_update_panel_inline = false
     end
@@ -402,7 +548,7 @@ local function draw_update_popup()
     end
   end
 
-  reaper.ImGui_SameLine(ctx)
+  safe_same_line()
   if reaper.ImGui_Button(ctx, "Update", 90, 0) then
     local launched = fns and fns.run_installer and fns.run_installer()
     if launched then
@@ -413,7 +559,7 @@ local function draw_update_popup()
     end
   end
 
-  reaper.ImGui_SameLine(ctx)
+  safe_same_line()
   if reaper.ImGui_Button(ctx, "Close", 90, 0) then
     reaper.ImGui_CloseCurrentPopup(ctx)
   end
@@ -429,7 +575,7 @@ function M.init(md, functions)
 end
 
 function M.loop()
-  if not ctx then return false end
+  if not has_valid_ctx() then return false end
 
   if reaper.ImGui_SetNextWindowSize then
     local cond = reaper.ImGui_Cond_FirstUseEver and reaper.ImGui_Cond_FirstUseEver() or 0
@@ -446,13 +592,12 @@ function M.loop()
     local changed_strength, new_strength = reaper.ImGui_SliderInt(ctx, "Suggestion Strength %", strength_pct, 0, 150)
     if changed_strength then
       strength_pct = new_strength
+      freq_report = nil
       suggestions_generated = false
+      active_results_tab = "analysis"
     end
 
-    reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Generate Suggestions", 160, 0) then
-      refresh_suggestions()
-    end
+    reaper.ImGui_TextDisabled(ctx, "Use Results tabs below: Analyze first, then Suggestions.")
 
     reaper.ImGui_Spacing(ctx)
     local columns = load_columns()
@@ -462,9 +607,29 @@ function M.loop()
     draw_move_controls(columns)
 
     reaper.ImGui_Separator(ctx)
-    reaper.ImGui_TextWrapped(ctx, "Suggestions by role (displayed below matching columns).")
+    reaper.ImGui_TextWrapped(ctx, "Results")
+    draw_results_tabs()
     reaper.ImGui_Spacing(ctx)
-    draw_suggestion_columns()
+
+    if active_results_tab == "analysis" then
+      if reaper.ImGui_Button(ctx, "Analyze Frequency", 150, 0) then
+        refresh_frequency_report()
+      end
+      reaper.ImGui_Spacing(ctx)
+      draw_frequency_report()
+    else
+      if freq_report then
+        if reaper.ImGui_Button(ctx, "Generate Suggestions", 160, 0) then
+          refresh_suggestions()
+        end
+      else
+        reaper.ImGui_TextDisabled(ctx, "Analyze Frequency first to enable suggestions.")
+      end
+      reaper.ImGui_Spacing(ctx)
+      reaper.ImGui_TextWrapped(ctx, "Suggestions by role (displayed below matching columns).")
+      reaper.ImGui_Spacing(ctx)
+      draw_suggestion_columns()
+    end
 
     if suggestions_generated and suggestion_data then
       reaper.ImGui_Spacing(ctx)
@@ -489,7 +654,11 @@ function M.loop()
       end
     else
       reaper.ImGui_Spacing(ctx)
-      reaper.ImGui_TextDisabled(ctx, "Run Generate Suggestions to enable Apply.")
+      if freq_report then
+        reaper.ImGui_TextDisabled(ctx, "Run Generate Suggestions to enable Apply.")
+      else
+        reaper.ImGui_TextDisabled(ctx, "Analyze Frequency first, then Generate Suggestions.")
+      end
     end
 
     if operation_done_msg ~= "" then

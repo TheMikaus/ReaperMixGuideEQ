@@ -1,4 +1,4 @@
-# MixGuideEQ v0.23.0
+# MixGuideEQ v0.27.0
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -27,6 +27,16 @@ Rule-driven Auto EQ assistant for Reaper.
 21. Added per-track Include/Exclude control; excluded tracks are ignored by suggestion counts and Auto EQ apply
 22. Added drum-subtype heuristics (kick, snare, toms, overheads, room) for per-track drum EQ decisions
 23. Hardened apply lifecycle so Undo begin/end always close cleanly even on runtime errors
+24. Added report-only Frequency Analysis panel with per-track metrics and recommendation hints (no auto-write)
+25. Fixed Analyze Frequency UI crash by hardening SameLine calls across compatibility paths
+26. Redesigned Frequency Analysis output into role cards with per-track metrics and concise recommendations
+27. Enforced Analyze-first workflow: Generate Suggestions is gated until analysis is run
+28. Added tabbed Results view (Analysis/Suggestions) to keep panel size stable
+29. Added ImGui context validation guard to reduce collapse/minimize-related UI crashes
+30. Moved Analyze and Generate buttons into their respective Results tabs (Analyze tab and Suggestions tab)
+31. Increased analysis and suggestion card heights for better readability in the existing panel size
+32. Expanded drum detection and analysis gating sensitivity so hi-hats/crashes are less likely to be skipped
+33. Suggestions now incorporate frequency-analysis recommendations when analysis data is available
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

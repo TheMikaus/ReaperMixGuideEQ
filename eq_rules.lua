@@ -131,7 +131,16 @@ function M.detect_drum_subtype(track_name)
   if n:find("kick", 1, true) or n:find("bd", 1, true) or n:find("kik", 1, true) then return "kick" end
   if n:find("snare", 1, true) or n:find("sd", 1, true) then return "snare" end
   if n:find("tom", 1, true) then return "toms" end
-  if n:find("overhead", 1, true) or n:find("oh", 1, true) or n:find("cym", 1, true) then return "overheads" end
+  if n:find("hihat", 1, true)
+    or n:find("hi-hat", 1, true)
+    or n:find("hat", 1, true)
+    or n:find("crash", 1, true)
+    or n:find("ride", 1, true)
+    or n:find("cym", 1, true)
+  then
+    return "overheads"
+  end
+  if n:find("overhead", 1, true) or n:find("oh", 1, true) then return "overheads" end
   if n:find("room", 1, true) then return "room" end
   return nil
 end

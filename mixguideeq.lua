@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.18.0
+-- @version 0.19.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,12 +17,23 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.18.0",
+  version = "0.19.0",
   install_source_dir = "",
   track_roles = {},
 }
 
 local MAX_RULE_MOVES = 3
+local BAND_TYPE_CODE = {
+  Band = 0,
+  LowShelf = 1,
+  HighShelf = 2,
+  LowPass = 3,
+  HighPass = 4,
+  AllPass = 5,
+  Notch = 6,
+  HP = 4,
+  LP = 3,
+}
 local DEBUG_APPLY_LOG = true
 
 local function get_debug_log_path()
@@ -322,13 +333,13 @@ local function apply_named_profile(track, fx_idx)
   local applied = 0
 
   local attempts = {
-    { "BANDTYPE0", "HP" },
+    { "BANDTYPE0", BAND_TYPE_CODE.HP },
     { "BANDENABLED0", 1 },
-    { "BANDTYPE1", "Band" },
+    { "BANDTYPE1", BAND_TYPE_CODE.Band },
     { "BANDENABLED1", 1 },
-    { "BANDTYPE2", "Band" },
+    { "BANDTYPE2", BAND_TYPE_CODE.Band },
     { "BANDENABLED2", 1 },
-    { "BANDTYPE3", "Band" },
+    { "BANDTYPE3", BAND_TYPE_CODE.Band },
     { "BANDENABLED3", 1 },
   }
 
@@ -534,10 +545,17 @@ local function set_band_enabled(track, fx_idx, band_idx, enabled)
 end
 
 local function set_band_type(track, fx_idx, band_idx, band_type)
+  local type_code = BAND_TYPE_CODE[band_type]
+  if type_code == nil then
+    log_apply(string.format("set_band_type unknown band_type=%s", tostring(band_type)))
+    return false
+  end
+
   local key = string.format("BANDTYPE%d", band_idx - 1)
-  if try_set_named_param(track, fx_idx, key, band_type) then
+  if try_set_named_param(track, fx_idx, key, type_code) then
     return true
   end
+  log_apply(string.format("set_band_type failed key=%s type=%s code=%d", key, tostring(band_type), type_code))
   return false
 end
 

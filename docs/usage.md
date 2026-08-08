@@ -23,6 +23,7 @@
 12. Apply targets band parameters using deterministic per-band mapping to avoid cross-band value mismatches
 13. Apply summary now includes the debug log file path for parameter-write diagnostics
 14. ReaEQ layouts without explicit "Band N" labels now use positional fallback mapping for Freq/Gain/BW triplets
+15. ReaEQ band filter types now write via numeric BANDTYPE codes for reliable HP/Bell/Shelf assignment
 
 ## Audio Item Rule
 

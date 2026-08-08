@@ -24,6 +24,7 @@
 13. Apply summary now includes the debug log file path for parameter-write diagnostics
 14. ReaEQ layouts without explicit "Band N" labels now use positional fallback mapping for Freq/Gain/BW triplets
 15. ReaEQ band filter types now write via numeric BANDTYPE codes for reliable HP/Bell/Shelf assignment
+16. ReaEQ BANDTYPE/BANDENABLED named config writes now use 1-based band key indexing
 
 ## Audio Item Rule
 

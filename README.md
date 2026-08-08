@@ -1,4 +1,4 @@
-# MixGuideEQ v0.19.0
+# MixGuideEQ v0.20.0
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -22,6 +22,7 @@ Rule-driven Auto EQ assistant for Reaper.
 16. Added detailed apply debug logging (param map, writes, readbacks) with log path in result summary
 17. Log-guided fix for ReaEQ parameter layouts with non-Band naming (positional fallback for first 15 params)
 18. Fixed BANDTYPE writes to use numeric ReaEQ type codes (HP/Band/HighShelf now map correctly)
+19. Fixed ReaEQ named config key indexing (BANDTYPE/BANDENABLED now target correct band numbers)
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.19.0
+-- @version 0.20.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.19.0",
+  version = "0.20.0",
   install_source_dir = "",
   track_roles = {},
 }
@@ -333,14 +333,14 @@ local function apply_named_profile(track, fx_idx)
   local applied = 0
 
   local attempts = {
-    { "BANDTYPE0", BAND_TYPE_CODE.HP },
-    { "BANDENABLED0", 1 },
-    { "BANDTYPE1", BAND_TYPE_CODE.Band },
+    { "BANDTYPE1", BAND_TYPE_CODE.HP },
     { "BANDENABLED1", 1 },
     { "BANDTYPE2", BAND_TYPE_CODE.Band },
     { "BANDENABLED2", 1 },
     { "BANDTYPE3", BAND_TYPE_CODE.Band },
     { "BANDENABLED3", 1 },
+    { "BANDTYPE4", BAND_TYPE_CODE.Band },
+    { "BANDENABLED4", 1 },
   }
 
   for _, entry in ipairs(attempts) do
@@ -536,7 +536,7 @@ local function dump_fx_params(track, fx_idx)
 end
 
 local function set_band_enabled(track, fx_idx, band_idx, enabled)
-  local key = string.format("BANDENABLED%d", band_idx - 1)
+  local key = string.format("BANDENABLED%d", band_idx)
   local val = enabled and 1 or 0
   if try_set_named_param(track, fx_idx, key, val) then
     return true
@@ -551,7 +551,7 @@ local function set_band_type(track, fx_idx, band_idx, band_type)
     return false
   end
 
-  local key = string.format("BANDTYPE%d", band_idx - 1)
+  local key = string.format("BANDTYPE%d", band_idx)
   if try_set_named_param(track, fx_idx, key, type_code) then
     return true
   end

@@ -56,6 +56,8 @@
 45. Level balancing is pan-aware by profile; wider-panned tracks can receive profile-specific relief
 46. Levels cards now show per-track pan value and pan-relief amount used in the recommendation
 47. Levels tab now shows an Apply Preview block (largest predicted boosts/cuts and root moves) before applying
+48. Profile hover tooltip rendering is now guarded against invalid-context hover edge cases
+49. Default window first-open height is taller for improved multi-card visibility
 
 ## Audio Item Rule
 

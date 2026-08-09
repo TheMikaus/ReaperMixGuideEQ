@@ -1,4 +1,4 @@
-# MixGuideEQ v0.35.1
+# MixGuideEQ v0.35.2
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -56,6 +56,8 @@ Rule-driven Auto EQ assistant for Reaper.
 50. Level analysis now includes pan-aware profile relief so wider-panned tracks can receive profile-specific loudness allowance
 51. Levels report now displays pan position and pan-relief contribution per track
 52. Added Apply Preview summary showing top predicted boosts/cuts and root moves before level write
+53. Hardened profile tooltip rendering against transient invalid ImGui context during hover updates
+54. Increased default main window height for better card visibility
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

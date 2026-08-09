@@ -190,16 +190,20 @@ end
 local function draw_profile_tooltip(profile)
   if not is_last_item_hovered() then return end
   if not begin_profile_tooltip() then return end
-  reaper.ImGui_Text(ctx, tostring(profile) .. " profile")
-  reaper.ImGui_Separator(ctx)
-  local lines = PROFILE_DESCRIPTIONS[profile]
-  if type(lines) == "table" then
-    for _, line in ipairs(lines) do
-      reaper.ImGui_Text(ctx, tostring(line))
+  local _ = pcall(function()
+    if not has_valid_ctx() then return end
+    reaper.ImGui_Text(ctx, tostring(profile) .. " profile")
+    reaper.ImGui_Separator(ctx)
+    local lines = PROFILE_DESCRIPTIONS[profile]
+    if type(lines) == "table" then
+      for _, line in ipairs(lines) do
+        if not has_valid_ctx() then break end
+        reaper.ImGui_Text(ctx, tostring(line))
+      end
+    else
+      reaper.ImGui_Text(ctx, "Profile balance mode.")
     end
-  else
-    reaper.ImGui_Text(ctx, "Profile balance mode.")
-  end
+  end)
   end_tooltip_any()
 end
 
@@ -1033,7 +1037,7 @@ function M.loop()
 
   if reaper.ImGui_SetNextWindowSize then
     local cond = reaper.ImGui_Cond_FirstUseEver and reaper.ImGui_Cond_FirstUseEver() or 0
-    reaper.ImGui_SetNextWindowSize(ctx, 1600, 800, cond)
+    reaper.ImGui_SetNextWindowSize(ctx, 1600, 920, cond)
   end
 
   local title = "MixGuideEQ v" .. tostring(md_ref.version or "")

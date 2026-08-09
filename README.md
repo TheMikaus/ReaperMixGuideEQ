@@ -1,4 +1,4 @@
-# MixGuideEQ v0.35.2
+# MixGuideEQ v0.35.3
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -58,6 +58,7 @@ Rule-driven Auto EQ assistant for Reaper.
 52. Added Apply Preview summary showing top predicted boosts/cuts and root moves before level write
 53. Hardened profile tooltip rendering against transient invalid ImGui context during hover updates
 54. Increased default main window height for better card visibility
+55. Levels role cards now include per-column preview highlights (top boost/cut and root move) for tracks in that role
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

@@ -58,6 +58,7 @@
 47. Levels tab now shows an Apply Preview block (largest predicted boosts/cuts and root moves) before applying
 48. Profile hover tooltip rendering is now guarded against invalid-context hover edge cases
 49. Default window first-open height is taller for improved multi-card visibility
+50. Each Levels role card now includes preview highlights for that role (top boost/cut and root move)
 
 ## Audio Item Rule
 

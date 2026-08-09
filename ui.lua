@@ -716,6 +716,36 @@ local function draw_volume_report()
         return
       end
 
+      local top_boost = nil
+      local top_cut = nil
+      local top_root = nil
+      for _, g in ipairs(role_row.groups or {}) do
+        local root_delta = tonumber(g.group_delta_db) or 0
+        if not top_root or math.abs(root_delta) > math.abs(top_root.delta) then
+          top_root = { name = tostring(g.root_name or "Root"), delta = root_delta }
+        end
+
+        for _, t in ipairs(g.entries or {}) do
+          local d = tonumber(t.final_preview_delta_db) or 0
+          if d > 0 and (not top_boost or d > top_boost.delta) then
+            top_boost = { name = tostring(t.name or "Track"), delta = d }
+          end
+          if d < 0 and (not top_cut or d < top_cut.delta) then
+            top_cut = { name = tostring(t.name or "Track"), delta = d }
+          end
+        end
+      end
+
+      reaper.ImGui_TextDisabled(ctx,
+        "Preview + " .. (top_boost and (top_boost.name .. " " .. fmt_db(top_boost.delta)) or "none")
+      )
+      reaper.ImGui_TextDisabled(ctx,
+        "Preview - " .. (top_cut and (top_cut.name .. " " .. fmt_db(top_cut.delta)) or "none")
+      )
+      reaper.ImGui_TextDisabled(ctx,
+        "Root move " .. (top_root and (top_root.name .. " " .. fmt_db(top_root.delta)) or "none")
+      )
+
       for _, g in ipairs(role_row.groups) do
         reaper.ImGui_Spacing(ctx)
         reaper.ImGui_Separator(ctx)

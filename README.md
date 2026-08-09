@@ -1,8 +1,69 @@
-# MixGuideEQ v0.36.0
+# MixGuideEQ v0.36.1
 
-Rule-driven Auto EQ assistant for Reaper.
+MixGuideEQ is a Reaper assistant that helps you:
 
-## Included in This Pass (11 features)
+- Map tracks into four practical mix roles (Drums, Guitar, Bass, Vox)
+- Generate role-aware EQ suggestions before writing anything
+- Analyze and apply profile-based level balancing (Even, Pop, Rock, EDM)
+- Keep changes reversible with a one-click level-apply revert snapshot
+
+## Install
+
+1. Open Reaper.
+2. Go to Actions > Load ReaScript.
+3. Run MixGuideEQ/install.lua.
+4. The installer copies files to {Reaper resource path}/Scripts/MixGuideEQ and registers the script action.
+
+## Update
+
+1. Open MixGuideEQ.
+2. Click Install/Update (bottom-right).
+3. If your source folder moved, set Installer source folder and click Save Source first.
+
+## Flow / Use
+
+1. Map tracks to roles using the four columns.
+2. Exclude tracks that should not be processed.
+3. Run Analyze Frequency.
+4. Generate Suggestions and review per-track cards.
+5. Apply Auto EQ when ready.
+6. Open Levels tab, pick a balance profile, run Analyze Levels.
+7. Review Volume Adjustment Preview at top of each role card.
+8. Apply Level Balance, listen, then use Revert Last Level Apply for A/B if needed.
+
+## What To Expect In Current Version
+
+- Suggestions are analysis-first and per-track.
+- Suggestion cards show the profile used when generated.
+- Drum and non-drum tracks both provide track-level suggestion visibility.
+- Levels are hierarchical:
+	- Child tracks are balanced relative to their root group.
+	- Root groups are then balanced against other role groups.
+- Pan-aware profile relief affects level recommendations (not pan automation).
+- Level apply captures a snapshot for one-click revert.
+- Current output is optimized to fit narrower windows with compact wrapped lines.
+
+## Known Scope
+
+- This tool sets static EQ/volume values; it does not automate over time.
+- Pan is considered for level recommendation context only.
+- Best results come from running analysis after mapping/exclusion is final.
+
+## Technical Details (Appendix)
+
+### Requirements
+
+- Reaper 6+
+- ReaPack
+- ReaImGui 0.8+
+
+### Project Data
+
+- Role assignments and exclusion flags are persisted per project in:
+	- {project folder}/{project name}.mixguideeq.roles
+- Installer source state is persisted for update flow resolution.
+
+### Current Technical Feature Log
 
 1. Installer and update flow modeled after MixDeck
 2. Rule profile engine with ReaEQ insertion workflow
@@ -63,39 +124,3 @@ Rule-driven Auto EQ assistant for Reaper.
 57. Added one-click Revert Last Level Apply with per-apply snapshot capture for A/B safety
 58. Levels tab now shows snapshot status (track count, profile, time) to confirm revert availability
 59. Added practical profile calibration workflow support through repeatable analyze/apply/revert loop
-11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
-
-## Requirements
-
-- Reaper 6+
-- ReaPack
-- ReaImGui 0.8+
-
-## Install
-
-1. Open Reaper
-2. Actions > Load ReaScript
-3. Run MixGuideEQ/install.lua
-4. The installer copies files to {Reaper resource path}/Scripts/MixGuideEQ and registers the action
-
-## Update
-
-- Click Install/Update (bottom-right in the main window) to rerun install.lua from the saved installer source folder.
-- If your source folder moved, update Installer source folder in the UI and click Save Source.
-
-## Current Behavior
-
-- Single-panel layout (no tabs): mapping, suggestions, and apply in one flow
-- Columns show all mapped tracks once (no duplicate A-Z/A-Z listing)
-- Child tracks are displayed as Parent-Child in columns
-- Suggestions are displayed below their matching role columns
-- Apply Auto EQ appears only after Generate Suggestions is run
-- Install/Update button is always visible in the bottom-right of the main window
-- Role assignments persist per saved Reaper project in {project folder}/{project name}.mixguideeq.roles
-- Update prioritizes the saved installer source path before fallback locations
-
-## Planned Next
-
-- Direct, deterministic band parameter writes for ReaEQ across all supported builds
-- FFT-based content analysis for rule biasing
-- Per-role editable templates and save/load presets

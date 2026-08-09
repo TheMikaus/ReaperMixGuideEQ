@@ -1,7 +1,7 @@
 -- MixGuideEQ Installer
 -- Run this script once in Reaper (Actions > Load ReaScript, run it)
 
-local MIXGUIDEEQ_VERSION = "0.35.3"
+local MIXGUIDEEQ_VERSION = "0.35.4"
 local REAIMGUI_MIN = "0.8"
 
 local function msg(text)

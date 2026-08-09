@@ -86,6 +86,18 @@ local function fmt_db(v)
   return string.format("%+.2f dB", tonumber(v) or 0)
 end
 
+local function short_label(text, max_len)
+  local s = tostring(text or "")
+  local n = tonumber(max_len) or 26
+  if #s <= n then
+    return s
+  end
+  if n <= 3 then
+    return s:sub(1, n)
+  end
+  return s:sub(1, n - 3) .. "..."
+end
+
 local PROFILE_DESCRIPTIONS = {
   Even = {
     "Balanced stems with moderate role separation.",
@@ -737,21 +749,24 @@ local function draw_volume_report()
       end
 
       reaper.ImGui_TextDisabled(ctx,
-        "Preview + " .. (top_boost and (top_boost.name .. " " .. fmt_db(top_boost.delta)) or "none")
+        "Volume Adjustment Preview"
       )
       reaper.ImGui_TextDisabled(ctx,
-        "Preview - " .. (top_cut and (top_cut.name .. " " .. fmt_db(top_cut.delta)) or "none")
+        "+ " .. (top_boost and (top_boost.name .. " " .. fmt_db(top_boost.delta)) or "No significant boosts")
       )
       reaper.ImGui_TextDisabled(ctx,
-        "Root move " .. (top_root and (top_root.name .. " " .. fmt_db(top_root.delta)) or "none")
+        "- " .. (top_cut and (top_cut.name .. " " .. fmt_db(top_cut.delta)) or "No significant cuts")
+      )
+      reaper.ImGui_TextDisabled(ctx,
+        "Root " .. (top_root and (top_root.name .. " " .. fmt_db(top_root.delta)) or "moves: none")
       )
 
       for _, g in ipairs(role_row.groups) do
         reaper.ImGui_Spacing(ctx)
         reaper.ImGui_Separator(ctx)
         reaper.ImGui_Text(ctx, tostring(g.root_name or "Root"))
-        reaper.ImGui_TextDisabled(ctx,
-          "Root shift " .. fmt_db(g.group_delta_db) .. " (" .. fmt_db(g.current_db) .. " -> " .. fmt_db(g.target_db) .. ")"
+        reaper.ImGui_TextWrapped(ctx,
+          "Root " .. fmt_db(g.group_delta_db) .. " | " .. fmt_db(g.current_db) .. " -> " .. fmt_db(g.target_db)
         )
         if g.can_apply_root == false then
           reaper.ImGui_TextDisabled(ctx, "Root excluded: global root shift will be skipped on apply")
@@ -759,14 +774,16 @@ local function draw_volume_report()
 
         for i = 1, math.min(6, #(g.entries or {})) do
           local t = g.entries[i]
-          reaper.ImGui_TextDisabled(ctx,
-            "- " .. tostring(t.name or "Track")
-            .. string.format(" | pan %.2f", tonumber(t.pan) or 0)
-            .. " | pan relief " .. fmt_db(t.pan_relief_db)
-            .. " | child " .. fmt_db(t.child_delta_db)
-            .. " (" .. tostring(t.child_reason or "relative balance") .. ")"
-            .. " | final " .. fmt_db(t.final_preview_delta_db)
+          local track_name = short_label(t.name, 24)
+          local compact = string.format(
+            "- %s | p %.2f | rel %s | ch %s | fin %s",
+            track_name,
+            tonumber(t.pan) or 0,
+            fmt_db(t.pan_relief_db),
+            fmt_db(t.child_delta_db),
+            fmt_db(t.final_preview_delta_db)
           )
+          reaper.ImGui_TextWrapped(ctx, compact)
         end
 
         if (g.entries and #g.entries or 0) > 6 then
@@ -778,73 +795,6 @@ local function draw_volume_report()
     if idx < #roles then
       safe_same_line()
     end
-  end
-end
-
-local function draw_level_preview_summary()
-  if not volume_report then return end
-
-  local tracks = {}
-  for _, action in ipairs(volume_report.track_adjustments or {}) do
-    tracks[#tracks + 1] = action
-  end
-
-  local roots = {}
-  for _, action in ipairs(volume_report.root_adjustments or {}) do
-    roots[#roots + 1] = action
-  end
-
-  table.sort(tracks, function(a, b)
-    return (tonumber(a.final_preview_delta_db) or 0) > (tonumber(b.final_preview_delta_db) or 0)
-  end)
-  table.sort(roots, function(a, b)
-    return math.abs(tonumber(a.delta_db) or 0) > math.abs(tonumber(b.delta_db) or 0)
-  end)
-
-  reaper.ImGui_Separator(ctx)
-  reaper.ImGui_Text(ctx, "Apply Preview")
-  reaper.ImGui_TextDisabled(ctx, "Largest predicted level moves before writing:")
-
-  local boost_count = 0
-  for _, t in ipairs(tracks) do
-    local d = tonumber(t.final_preview_delta_db) or 0
-    if d > 0.05 then
-      reaper.ImGui_TextDisabled(ctx, "+ " .. tostring(t.name or "Track") .. " " .. fmt_db(d))
-      boost_count = boost_count + 1
-      if boost_count >= 3 then break end
-    end
-  end
-  if boost_count == 0 then
-    reaper.ImGui_TextDisabled(ctx, "+ No significant boosts")
-  end
-
-  local cut_count = 0
-  for i = #tracks, 1, -1 do
-    local t = tracks[i]
-    local d = tonumber(t.final_preview_delta_db) or 0
-    if d < -0.05 then
-      reaper.ImGui_TextDisabled(ctx, "- " .. tostring(t.name or "Track") .. " " .. fmt_db(d))
-      cut_count = cut_count + 1
-      if cut_count >= 3 then break end
-    end
-  end
-  if cut_count == 0 then
-    reaper.ImGui_TextDisabled(ctx, "- No significant cuts")
-  end
-
-  local root_count = 0
-  for _, r in ipairs(roots) do
-    local d = tonumber(r.delta_db) or 0
-    if math.abs(d) >= 0.05 then
-      reaper.ImGui_TextDisabled(ctx,
-        "Root " .. tostring(r.root_name or "Root") .. " " .. fmt_db(d)
-      )
-      root_count = root_count + 1
-      if root_count >= 4 then break end
-    end
-  end
-  if root_count == 0 then
-    reaper.ImGui_TextDisabled(ctx, "Root moves: none")
   end
 end
 
@@ -1153,8 +1103,6 @@ function M.loop()
             end
           end
         end
-        reaper.ImGui_Spacing(ctx)
-        draw_level_preview_summary()
         reaper.ImGui_Spacing(ctx)
         draw_volume_report()
         reaper.ImGui_Spacing(ctx)

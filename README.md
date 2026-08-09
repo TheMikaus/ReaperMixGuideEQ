@@ -1,4 +1,4 @@
-# MixGuideEQ v0.34.0
+# MixGuideEQ v0.34.1
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -52,6 +52,7 @@ Rule-driven Auto EQ assistant for Reaper.
 46. Changing balance profile no longer clears existing suggestion/level cards; card headers show the profile used for generation
 47. Profile tooltips are wider for easier readability of profile intent text
 48. Suggestions now meaningfully use profile by adjusting per-role suggestion strength and adding per-track profile level intent hints
+49. Profile tooltips now use fixed landscape size constraints to avoid tall-open resize behavior
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

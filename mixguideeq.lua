@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.34.0
+-- @version 0.34.1
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.34.0",
+  version = "0.34.1",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},

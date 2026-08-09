@@ -87,10 +87,22 @@ local function fmt_db(v)
 end
 
 local PROFILE_DESCRIPTIONS = {
-  Even = "Balanced stems with moderate role separation.",
-  Pop = "Vocals forward, controlled low-end and guitars.",
-  Rock = "Punchy drums and guitars, vocals slightly tucked.",
-  EDM = "Low-end and vocal focus with lean mids.",
+  Even = {
+    "Balanced stems with moderate role separation.",
+    "Use when you want neutral, steady role balance.",
+  },
+  Pop = {
+    "Vocals forward, controlled low-end and guitars.",
+    "Use when lead clarity and lyric focus are priority.",
+  },
+  Rock = {
+    "Punchy drums and guitars, vocals slightly tucked.",
+    "Use when rhythm energy should feel more aggressive.",
+  },
+  EDM = {
+    "Low-end and vocal focus with lean mids.",
+    "Use when kick/bass impact should carry the mix.",
+  },
 }
 
 local function child_border_flag()
@@ -161,22 +173,28 @@ local function is_last_item_hovered()
   end)
   return ok and hovered == true
 end
+local function begin_profile_tooltip()
+  if not has_valid_ctx() then return false end
+  if reaper.APIExists("ImGui_SetNextWindowSizeConstraints") then
+    pcall(function()
+      reaper.ImGui_SetNextWindowSizeConstraints(ctx, 420, 110, 540, 170)
+    end)
+  end
+  return begin_tooltip_any()
+end
 
 local function draw_profile_tooltip(profile)
   if not is_last_item_hovered() then return end
-  if not begin_tooltip_any() then return end
-  if reaper.APIExists("ImGui_PushTextWrapPos") then
-    pcall(function()
-      reaper.ImGui_PushTextWrapPos(ctx, 440)
-    end)
-  end
+  if not begin_profile_tooltip() then return end
   reaper.ImGui_Text(ctx, tostring(profile) .. " profile")
   reaper.ImGui_Separator(ctx)
-  reaper.ImGui_TextWrapped(ctx, tostring(PROFILE_DESCRIPTIONS[profile] or "Profile balance mode."))
-  if reaper.APIExists("ImGui_PopTextWrapPos") then
-    pcall(function()
-      reaper.ImGui_PopTextWrapPos(ctx)
-    end)
+  local lines = PROFILE_DESCRIPTIONS[profile]
+  if type(lines) == "table" then
+    for _, line in ipairs(lines) do
+      reaper.ImGui_Text(ctx, tostring(line))
+    end
+  else
+    reaper.ImGui_Text(ctx, "Profile balance mode.")
   end
   end_tooltip_any()
 end

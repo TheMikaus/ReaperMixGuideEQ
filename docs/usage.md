@@ -52,6 +52,7 @@
 41. Changing balance profile keeps current cards visible; suggestion card headers show the profile used to generate them
 42. Profile tooltips use a wider wrap width for clearer explanation text
 43. Suggestions now adapt to the selected profile via per-role suggestion strength scaling and profile level-intent hints
+44. Profile tooltips now open with a fixed landscape shape (no tall-first resize jump)
 
 ## Audio Item Rule
 

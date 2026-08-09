@@ -37,6 +37,13 @@
 26. Analyze button is on the Analysis tab; Generate Suggestions button is on the Suggestions tab
 27. Frequency and suggestion cards are taller for easier per-track review
 28. Suggestions prefer analysis-informed recommendation lines when frequency analysis data exists
+29. Analyze Frequency now shows in-progress state and percent complete while it runs
+30. Results tab headers use real tab controls where available for clearer mode switching
+31. Drum suggestions are presented per track in the Suggestions tab
+32. Analysis-informed suggestions now explain which metric triggered each recommendation
+33. Hover a Suggestions card to view analysis evidence tooltip (metrics + recommendation trigger context)
+34. Suggestions card body now lists only proposed EQ changes (analysis evidence moved to hover tooltips)
+35. Drum suggestion tooltip evidence is shown per track (hover drum track label)
 
 ## Audio Item Rule
 

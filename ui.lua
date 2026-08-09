@@ -14,6 +14,8 @@ local suggestions_generated = false
 local apply_report = "Run Generate Suggestions to enable apply."
 local freq_report = nil
 local active_results_tab = "analysis"
+local analyze_in_progress = false
+local analyze_progress_pct = 0
 local operation_done_msg = ""
 
 local selected_track_guid = nil
@@ -24,6 +26,7 @@ local should_close_window = false
 
 local HAS_POPUP_MODAL_API = reaper.APIExists("ImGui_BeginPopupModal") and reaper.APIExists("ImGui_OpenPopup")
 local HAS_SETCURSOR_API = reaper.APIExists("ImGui_SetCursorPosX") and reaper.APIExists("ImGui_SetCursorPosY")
+local HAS_TABBAR_API = reaper.APIExists("ImGui_BeginTabBar") and reaper.APIExists("ImGui_BeginTabItem")
 
 local function set_status(msg)
   status_msg = msg
@@ -109,6 +112,127 @@ local function safe_same_line()
   return ok
 end
 
+local function begin_tooltip_any()
+  if not has_valid_ctx() then return false end
+  if not reaper.APIExists("ImGui_BeginTooltip") then return false end
+  local ok, opened = pcall(function()
+    return reaper.ImGui_BeginTooltip(ctx)
+  end)
+  return ok and opened
+end
+
+local function end_tooltip_any()
+  if not has_valid_ctx() then return end
+  if not reaper.APIExists("ImGui_EndTooltip") then return end
+  pcall(function()
+    reaper.ImGui_EndTooltip(ctx)
+  end)
+end
+
+local function is_last_item_hovered()
+  if not has_valid_ctx() then return false end
+  if not reaper.APIExists("ImGui_IsItemHovered") then return false end
+  local ok, hovered = pcall(function()
+    return reaper.ImGui_IsItemHovered(ctx)
+  end)
+  return ok and hovered == true
+end
+
+local function get_analysis_row(role)
+  if not freq_report or not freq_report.rows then return nil end
+  for _, row in ipairs(freq_report.rows) do
+    if row.role == role then
+      return row
+    end
+  end
+  return nil
+end
+
+local function draw_analysis_tooltip_for_role(role)
+  local row = get_analysis_row(role)
+  if not row then return end
+  if not begin_tooltip_any() then return end
+
+  reaper.ImGui_Text(ctx, title_role(role) .. " analysis evidence")
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_TextDisabled(ctx,
+    "Analyzed " .. tostring(row.analyzed_track_count or 0)
+    .. " | Excluded " .. tostring(row.excluded_track_count or 0)
+    .. " | Skipped " .. tostring(row.skipped_track_count or 0)
+  )
+
+  local shown = 0
+  for _, tr in ipairs(row.tracks or {}) do
+    if shown >= 3 then break end
+    reaper.ImGui_Spacing(ctx)
+    reaper.ImGui_Text(ctx, tostring(tr.name or "Track"))
+    if tr.metrics then
+      reaper.ImGui_TextDisabled(ctx, string.format(
+        "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
+        tonumber(tr.metrics.avg_rms) or 0,
+        tonumber(tr.metrics.mud_ratio) or 0,
+        tonumber(tr.metrics.presence_ratio) or 0,
+        tonumber(tr.metrics.brightness_ratio) or 0
+      ))
+    else
+      reaper.ImGui_TextDisabled(ctx, tostring(tr.summary or "No metrics"))
+    end
+    local rec = (tr.recommendations and tr.recommendations[1]) or ""
+    if rec ~= "" then
+      reaper.ImGui_TextDisabled(ctx, "- " .. tostring(rec))
+    end
+    shown = shown + 1
+  end
+
+  if (row.tracks and #row.tracks or 0) > shown then
+    reaper.ImGui_Spacing(ctx)
+    reaper.ImGui_TextDisabled(ctx, "...hovering card shows first " .. tostring(shown) .. " tracks")
+  end
+
+  end_tooltip_any()
+end
+
+local function draw_analysis_tooltip_for_track(role, track_name, track_guid)
+  local row = get_analysis_row(role)
+  if not row or not row.tracks then return end
+  local target = nil
+  for _, tr in ipairs(row.tracks) do
+    if track_guid and track_guid ~= "" and tostring(tr.guid or "") == tostring(track_guid) then
+      target = tr
+      break
+    end
+    if tostring(tr.name or "") == tostring(track_name or "") then
+      target = tr
+      break
+    end
+  end
+  if not target then return end
+  if not begin_tooltip_any() then return end
+
+  reaper.ImGui_Text(ctx, tostring(target.name or "Track") .. " analysis evidence")
+  reaper.ImGui_Separator(ctx)
+  if target.metrics then
+    reaper.ImGui_TextDisabled(ctx, string.format(
+      "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
+      tonumber(target.metrics.avg_rms) or 0,
+      tonumber(target.metrics.mud_ratio) or 0,
+      tonumber(target.metrics.presence_ratio) or 0,
+      tonumber(target.metrics.brightness_ratio) or 0
+    ))
+  else
+    reaper.ImGui_TextDisabled(ctx, tostring(target.summary or "No metrics"))
+  end
+
+  local rec_shown = 0
+  for _, rec in ipairs(target.recommendations or {}) do
+    if rec_shown >= 2 then break end
+    reaper.ImGui_TextDisabled(ctx, "- " .. tostring(rec))
+    rec_shown = rec_shown + 1
+  end
+
+  end_tooltip_any()
+end
+
 local function safe_draw_child(label, width, height, draw_fn)
   local started, opened = begin_child_any(label, width, height)
   if not started then
@@ -147,35 +271,75 @@ local function refresh_suggestions()
 end
 
 local function refresh_frequency_report()
-  if fns and fns.analyze_frequency_report then
-    local ok, report = fns.analyze_frequency_report(strength_pct)
+  if fns and fns.start_frequency_analysis then
+    local ok = fns.start_frequency_analysis(strength_pct)
     if ok then
-      freq_report = report
+      freq_report = nil
+      analyze_in_progress = true
+      analyze_progress_pct = 0
       suggestions_generated = false
       active_results_tab = "analysis"
-      set_status("Frequency analysis complete")
+      set_status("Frequency analysis started")
     else
       freq_report = nil
+      analyze_in_progress = false
+      analyze_progress_pct = 0
       set_status("Frequency analysis failed")
     end
   else
     freq_report = nil
+    analyze_in_progress = false
+    analyze_progress_pct = 0
     set_status("Frequency analysis unavailable")
   end
 end
 
+local function step_frequency_analysis_job()
+  if not analyze_in_progress then return end
+  if not (fns and fns.step_frequency_analysis) then
+    analyze_in_progress = false
+    set_status("Frequency analysis unavailable")
+    return
+  end
+
+  local ok, result = fns.step_frequency_analysis(1)
+  if not ok then
+    analyze_in_progress = false
+    set_status("Frequency analysis failed")
+    return
+  end
+
+  analyze_progress_pct = math.max(0, math.min(100, math.floor(((result.progress or 0) * 100) + 0.5)))
+  if result.done then
+    analyze_in_progress = false
+    freq_report = result.report
+    set_status("Frequency analysis complete")
+  end
+end
+
 local function draw_results_tabs()
+  if HAS_TABBAR_API and reaper.ImGui_BeginTabBar(ctx, "##results_tabs") then
+    if reaper.ImGui_BeginTabItem(ctx, "Analysis") then
+      active_results_tab = "analysis"
+      reaper.ImGui_EndTabItem(ctx)
+    end
+
+    local sugg_label = freq_report and "Suggestions" or "Suggestions (Analyze first)"
+    if reaper.ImGui_BeginTabItem(ctx, sugg_label) then
+      active_results_tab = "suggestions"
+      reaper.ImGui_EndTabItem(ctx)
+    end
+
+    reaper.ImGui_EndTabBar(ctx)
+    return
+  end
+
   if reaper.ImGui_Button(ctx, "Analysis", 100, 0) then
     active_results_tab = "analysis"
   end
-
   safe_same_line()
-  if freq_report then
-    if reaper.ImGui_Button(ctx, "Suggestions", 110, 0) then
-      active_results_tab = "suggestions"
-    end
-  else
-    reaper.ImGui_TextDisabled(ctx, "Suggestions (Analyze first)")
+  if reaper.ImGui_Button(ctx, "Suggestions", 110, 0) then
+    active_results_tab = "suggestions"
   end
 end
 
@@ -257,11 +421,21 @@ local function draw_suggestion_column(role, width, height)
       return
     end
 
-    reaper.ImGui_Text(ctx, tostring(row_data.audio_track_count) .. " audio track(s)")
-    if (row_data.excluded_track_count or 0) > 0 then
-      reaper.ImGui_TextDisabled(ctx, tostring(row_data.excluded_track_count) .. " excluded track(s)")
+    if role == "drums" and row_data.track_suggestions and #row_data.track_suggestions > 0 then
+      for _, track_block in ipairs(row_data.track_suggestions) do
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_Separator(ctx)
+        reaper.ImGui_Text(ctx, tostring(track_block.name or "Drum Track"))
+        if is_last_item_hovered() then
+          draw_analysis_tooltip_for_track(role, track_block.name, track_block.guid)
+        end
+        for i = 1, math.min(4, #(track_block.lines or {})) do
+          reaper.ImGui_TextDisabled(ctx, "- " .. tostring(track_block.lines[i]))
+        end
+      end
+      return
     end
-    reaper.ImGui_TextWrapped(ctx, row_data.summary)
+
     for _, line in ipairs(row_data.lines or {}) do
       reaper.ImGui_TextDisabled(ctx, "- " .. line)
     end
@@ -279,6 +453,9 @@ local function draw_suggestion_columns()
 
   for idx, role in ipairs(roles) do
     draw_suggestion_column(role, width, height)
+    if role ~= "drums" and is_last_item_hovered() then
+      draw_analysis_tooltip_for_role(role)
+    end
     if idx < #roles then
       safe_same_line()
     end
@@ -286,9 +463,14 @@ local function draw_suggestion_columns()
 end
 
 local function draw_frequency_report()
-  if not freq_report then
+  if analyze_in_progress then
+    reaper.ImGui_Separator(ctx)
+    reaper.ImGui_Text(ctx, "Frequency Analysis")
+    reaper.ImGui_TextDisabled(ctx, "Analyzing... " .. tostring(analyze_progress_pct) .. "%")
     return
   end
+
+  if not freq_report then return end
 
   reaper.ImGui_Separator(ctx)
   reaper.ImGui_Text(ctx, "Frequency Analysis Report (read-only)")
@@ -577,6 +759,8 @@ end
 function M.loop()
   if not has_valid_ctx() then return false end
 
+  step_frequency_analysis_job()
+
   if reaper.ImGui_SetNextWindowSize then
     local cond = reaper.ImGui_Cond_FirstUseEver and reaper.ImGui_Cond_FirstUseEver() or 0
     reaper.ImGui_SetNextWindowSize(ctx, 1600, 800, cond)
@@ -593,6 +777,8 @@ function M.loop()
     if changed_strength then
       strength_pct = new_strength
       freq_report = nil
+      analyze_in_progress = false
+      analyze_progress_pct = 0
       suggestions_generated = false
       active_results_tab = "analysis"
     end
@@ -612,13 +798,17 @@ function M.loop()
     reaper.ImGui_Spacing(ctx)
 
     if active_results_tab == "analysis" then
-      if reaper.ImGui_Button(ctx, "Analyze Frequency", 150, 0) then
+      if analyze_in_progress then
+        reaper.ImGui_TextDisabled(ctx, "Analyze in progress...")
+      elseif reaper.ImGui_Button(ctx, "Analyze Frequency", 150, 0) then
         refresh_frequency_report()
       end
       reaper.ImGui_Spacing(ctx)
       draw_frequency_report()
     else
-      if freq_report then
+      if analyze_in_progress then
+        reaper.ImGui_TextDisabled(ctx, "Wait for analysis to complete before generating suggestions.")
+      elseif freq_report then
         if reaper.ImGui_Button(ctx, "Generate Suggestions", 160, 0) then
           refresh_suggestions()
         end

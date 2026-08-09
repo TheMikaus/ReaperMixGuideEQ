@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.27.0
+-- @version 0.31.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,11 +17,12 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.27.0",
+  version = "0.31.0",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
   last_frequency_report = nil,
+  frequency_analysis_job = nil,
 }
 
 local MAX_RULE_MOVES = 3
@@ -355,62 +356,89 @@ local function build_frequency_recommendations(role, track_name, metrics, streng
     recs[#recs + 1] = line
   end
 
+  local function push_ratio_reason(label, amount_db, band_text, metric_name, observed, comparator, threshold)
+    push(string.format(
+      "%s: %.1f dB @ %s because %s %.2f %s %.2f",
+      label,
+      amount_db,
+      band_text,
+      metric_name,
+      observed,
+      comparator,
+      threshold
+    ))
+  end
+
+  local function push_balance_reason(label, amount_db, band_text, left_name, left_value, comparator, right_name, right_value)
+    push(string.format(
+      "%s: %.1f dB @ %s because %s %.2f %s %s %.2f",
+      label,
+      amount_db,
+      band_text,
+      left_name,
+      left_value,
+      comparator,
+      right_name,
+      right_value
+    ))
+  end
+
   if role == "guitar" then
     if metrics.mud_ratio > 1.30 then
-      push(string.format("Cut mud: %.1f dB @ 250-350 Hz", 1.5 * strength))
+      push_ratio_reason("Cut mud", 1.5 * strength, "250-350 Hz", "mud ratio", metrics.mud_ratio, ">", 1.30)
     end
     if metrics.presence_ratio < 0.95 then
-      push(string.format("Add presence: %.1f dB @ 2.5-3.5 kHz", 1.5 * strength))
+      push_ratio_reason("Add presence", 1.5 * strength, "2.5-3.5 kHz", "presence ratio", metrics.presence_ratio, "<", 0.95)
     end
     if metrics.brightness_ratio > 1.70 then
-      push(string.format("Tame fizz: %.1f dB @ 6-8 kHz", 1.0 * strength))
+      push_ratio_reason("Tame fizz", 1.0 * strength, "6-8 kHz", "brightness ratio", metrics.brightness_ratio, ">", 1.70)
     end
   elseif role == "bass" then
     if metrics.low > (metrics.low_mid * 1.9) then
-      push(string.format("Control boom: %.1f dB @ 80-120 Hz", 1.5 * strength))
+      push_balance_reason("Control boom", 1.5 * strength, "80-120 Hz", "low energy", metrics.low, ">", "low-mid energy", metrics.low_mid * 1.9)
     end
     if metrics.presence_ratio < 0.80 then
-      push(string.format("Add note definition: %.1f dB @ 1-1.5 kHz", 1.0 * strength))
+      push_ratio_reason("Add note definition", 1.0 * strength, "1-1.5 kHz", "presence ratio", metrics.presence_ratio, "<", 0.80)
     end
   elseif role == "vocals" then
     if metrics.mud_ratio > 1.20 then
-      push(string.format("Reduce mud: %.1f dB @ 200-350 Hz", 1.5 * strength))
+      push_ratio_reason("Reduce mud", 1.5 * strength, "200-350 Hz", "mud ratio", metrics.mud_ratio, ">", 1.20)
     end
     if metrics.presence_ratio < 1.00 then
-      push(string.format("Increase clarity: %.1f dB @ 2.5-4 kHz", 1.5 * strength))
+      push_ratio_reason("Increase clarity", 1.5 * strength, "2.5-4 kHz", "presence ratio", metrics.presence_ratio, "<", 1.00)
     end
     if metrics.brightness_ratio < 0.80 then
-      push(string.format("Add air: %.1f dB @ 10-12 kHz", 1.0 * strength))
+      push_ratio_reason("Add air", 1.0 * strength, "10-12 kHz", "brightness ratio", metrics.brightness_ratio, "<", 0.80)
     end
   elseif role == "drums" then
     local subtype = eq_rules.detect_drum_subtype and eq_rules.detect_drum_subtype(track_name)
     if subtype == "kick" then
       if metrics.presence_ratio < 0.85 then
-        push(string.format("Kick click: %.1f dB @ 2.5-4 kHz", 1.0 * strength))
+        push_ratio_reason("Kick click", 1.0 * strength, "2.5-4 kHz", "presence ratio", metrics.presence_ratio, "<", 0.85)
       end
       if metrics.mud_ratio > 1.20 then
-        push(string.format("Kick boxiness cut: %.1f dB @ 250-400 Hz", 1.5 * strength))
+        push_ratio_reason("Kick boxiness cut", 1.5 * strength, "250-400 Hz", "mud ratio", metrics.mud_ratio, ">", 1.20)
       end
     elseif subtype == "snare" then
       if metrics.presence_ratio < 0.95 then
-        push(string.format("Snare crack: %.1f dB @ 3-5 kHz", 1.5 * strength))
+        push_ratio_reason("Snare crack", 1.5 * strength, "3-5 kHz", "presence ratio", metrics.presence_ratio, "<", 0.95)
       end
       if metrics.mud_ratio > 1.20 then
-        push(string.format("Snare ring/box cut: %.1f dB @ 500-800 Hz", 1.0 * strength))
+        push_ratio_reason("Snare ring/box cut", 1.0 * strength, "500-800 Hz", "mud ratio", metrics.mud_ratio, ">", 1.20)
       end
     elseif subtype == "overheads" or subtype == "room" then
       if metrics.brightness_ratio > 1.85 then
-        push(string.format("Tame cymbal harshness: %.1f dB @ 7-9 kHz", 1.0 * strength))
+        push_ratio_reason("Tame cymbal harshness", 1.0 * strength, "7-9 kHz", "brightness ratio", metrics.brightness_ratio, ">", 1.85)
       end
       if metrics.mud_ratio > 1.10 then
-        push(string.format("Low cleanup: %.1f dB @ 200-350 Hz", 1.0 * strength))
+        push_ratio_reason("Low cleanup", 1.0 * strength, "200-350 Hz", "mud ratio", metrics.mud_ratio, ">", 1.10)
       end
     else
       if metrics.presence_ratio < 0.90 then
-        push(string.format("Add attack/presence: %.1f dB @ 3-4 kHz", 1.0 * strength))
+        push_ratio_reason("Add attack/presence", 1.0 * strength, "3-4 kHz", "presence ratio", metrics.presence_ratio, "<", 0.90)
       end
       if metrics.mud_ratio > 1.20 then
-        push(string.format("Reduce boxiness: %.1f dB @ 350-600 Hz", 1.0 * strength))
+        push_ratio_reason("Reduce boxiness", 1.0 * strength, "350-600 Hz", "mud ratio", metrics.mud_ratio, ">", 1.20)
       end
     end
   end
@@ -956,6 +984,7 @@ local function build_suggestions(strength_pct)
   for _, role in ipairs(roles) do
     local audio_tracks = {}
     local excluded_tracks = {}
+    local track_suggestions = {}
     local drum_subtype_counts = {}
     for _, item in ipairs(columns[role]) do
       if item.excluded then
@@ -974,6 +1003,28 @@ local function build_suggestions(strength_pct)
 
     local rule = eq_rules.build_rule_set(role, strength_pct)
     local summary = eq_rules.render_summary(rule)
+
+    if role == "drums" then
+      for _, item in ipairs(columns[role]) do
+        if item.has_audio and not item.excluded then
+          local track_rule = eq_rules.build_rule_set(role, strength_pct, {
+            track_name = item.name,
+            track_label = item.display_name,
+          })
+          local lines_for_track = render_applied_rule_lines(track_rule)
+
+          track_suggestions[#track_suggestions + 1] = {
+            guid = item.guid,
+            name = item.display_name,
+            lines = lines_for_track,
+          }
+        end
+      end
+
+      if #track_suggestions > 0 then
+        summary = summary .. "\nPer-track drum suggestions enabled."
+      end
+    end
     if role == "drums" then
       local parts = {}
       for _, subtype in ipairs({ "kick", "snare", "toms", "overheads", "room" }) do
@@ -1029,6 +1080,7 @@ local function build_suggestions(strength_pct)
       audio_tracks = audio_tracks,
       excluded_track_count = #excluded_tracks,
       excluded_tracks = excluded_tracks,
+      track_suggestions = track_suggestions,
       summary = summary,
       lines = lines,
     }
@@ -1038,6 +1090,166 @@ local function build_suggestions(strength_pct)
     columns = columns,
     rows = rows,
     total_audio_tracks = total_audio_tracks,
+  }
+end
+
+local function start_frequency_analysis(strength_pct)
+  local columns = build_role_columns()
+  local roles = get_roles_order()
+
+  local role_rows = {
+    drums = { role = "drums", analyzed_track_count = 0, excluded_track_count = 0, skipped_track_count = 0, tracks = {} },
+    guitar = { role = "guitar", analyzed_track_count = 0, excluded_track_count = 0, skipped_track_count = 0, tracks = {} },
+    bass = { role = "bass", analyzed_track_count = 0, excluded_track_count = 0, skipped_track_count = 0, tracks = {} },
+    vocals = { role = "vocals", analyzed_track_count = 0, excluded_track_count = 0, skipped_track_count = 0, tracks = {} },
+  }
+
+  local targets = {}
+  local total_excluded = 0
+  local total_skipped = 0
+
+  for _, role in ipairs(roles) do
+    for _, item in ipairs(columns[role]) do
+      if item.excluded then
+        role_rows[role].excluded_track_count = role_rows[role].excluded_track_count + 1
+        total_excluded = total_excluded + 1
+      elseif not item.has_audio then
+        role_rows[role].skipped_track_count = role_rows[role].skipped_track_count + 1
+        total_skipped = total_skipped + 1
+      else
+        targets[#targets + 1] = {
+          role = role,
+          guid = item.guid,
+          name = item.name,
+          display_name = item.display_name,
+        }
+      end
+    end
+  end
+
+  app.frequency_analysis_job = {
+    strength_pct = strength_pct,
+    targets = targets,
+    idx = 1,
+    role_rows = role_rows,
+    total_excluded = total_excluded,
+    total_skipped = total_skipped,
+    done = false,
+  }
+
+  return true, {
+    queued = #targets,
+    excluded = total_excluded,
+    skipped = total_skipped,
+  }
+end
+
+local function step_frequency_analysis(max_tracks_per_step)
+  local job = app.frequency_analysis_job
+  if not job then
+    return false, "No active analysis job"
+  end
+
+  if job.done then
+    return true, {
+      done = true,
+      progress = 1.0,
+      report = app.last_frequency_report,
+    }
+  end
+
+  local step_n = math.max(1, tonumber(max_tracks_per_step) or 1)
+  local processed = 0
+
+  while processed < step_n and job.idx <= #job.targets do
+    local target = job.targets[job.idx]
+    local role_row = job.role_rows[target.role]
+    local track = get_track_by_guid(target.guid)
+
+    if not track then
+      role_row.skipped_track_count = role_row.skipped_track_count + 1
+      job.total_skipped = job.total_skipped + 1
+    else
+      local metrics, err = analyze_track_frequency_profile(track)
+      if not metrics then
+        role_row.tracks[#role_row.tracks + 1] = {
+          guid = target.guid,
+          name = target.display_name,
+          summary = "Skipped: " .. tostring(err or "analysis failed"),
+          recommendations = { "No recommendation (analysis unavailable)." },
+        }
+        role_row.skipped_track_count = role_row.skipped_track_count + 1
+        job.total_skipped = job.total_skipped + 1
+      else
+        role_row.analyzed_track_count = role_row.analyzed_track_count + 1
+        role_row.tracks[#role_row.tracks + 1] = {
+          guid = target.guid,
+          name = target.display_name,
+          metrics = {
+            windows = metrics.windows,
+            avg_rms = metrics.avg_rms,
+            mud_ratio = metrics.mud_ratio,
+            presence_ratio = metrics.presence_ratio,
+            brightness_ratio = metrics.brightness_ratio,
+          },
+          summary = string.format(
+            "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
+            metrics.avg_rms,
+            metrics.mud_ratio,
+            metrics.presence_ratio,
+            metrics.brightness_ratio
+          ),
+          recommendations = build_frequency_recommendations(target.role, target.name or target.display_name, metrics, job.strength_pct),
+        }
+      end
+    end
+
+    job.idx = job.idx + 1
+    processed = processed + 1
+  end
+
+  local processed_total = math.min(job.idx - 1, #job.targets)
+  local progress = 1.0
+  if #job.targets > 0 then
+    progress = processed_total / #job.targets
+  end
+
+  if job.idx > #job.targets then
+    local roles = get_roles_order()
+    local rows = {}
+    local total_analyzed = 0
+    for _, role in ipairs(roles) do
+      local r = job.role_rows[role]
+      total_analyzed = total_analyzed + (r.analyzed_track_count or 0)
+      rows[#rows + 1] = r
+    end
+
+    local summary = string.format(
+      "Frequency report: analyzed %d track(s), excluded %d, skipped %d.",
+      total_analyzed,
+      job.total_excluded,
+      job.total_skipped
+    )
+
+    local report = {
+      summary = summary,
+      rows = rows,
+    }
+    app.last_frequency_report = report
+    job.done = true
+
+    return true, {
+      done = true,
+      progress = 1.0,
+      report = report,
+    }
+  end
+
+  return true, {
+    done = false,
+    progress = progress,
+    processed = processed_total,
+    total = #job.targets,
   }
 end
 
@@ -1141,6 +1353,7 @@ local function analyze_frequency_report(strength_pct)
           local metrics, err = analyze_track_frequency_profile(track)
           if not metrics then
             role_rows[#role_rows + 1] = {
+              guid = item.guid,
               name = item.display_name,
               summary = "Skipped: " .. tostring(err or "analysis failed"),
               recommendations = { "No recommendation (analysis unavailable)." },
@@ -1149,6 +1362,7 @@ local function analyze_frequency_report(strength_pct)
           else
             analyzed_count = analyzed_count + 1
             role_rows[#role_rows + 1] = {
+              guid = item.guid,
               name = item.display_name,
               metrics = {
                 windows = metrics.windows,
@@ -1280,6 +1494,8 @@ local fns = {
   build_suggestions = build_suggestions,
   apply_mapped_roles = apply_mapped_roles,
   analyze_frequency_report = analyze_frequency_report,
+  start_frequency_analysis = start_frequency_analysis,
+  step_frequency_analysis = step_frequency_analysis,
   save_project_roles = save_project_roles,
   load_project_roles = load_project_roles,
   run_installer = run_installer,

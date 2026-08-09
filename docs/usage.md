@@ -53,6 +53,9 @@
 42. Profile tooltips use a wider wrap width for clearer explanation text
 43. Suggestions now adapt to the selected profile via per-role suggestion strength scaling and profile level-intent hints
 44. Profile tooltips now open with a fixed landscape shape (no tall-first resize jump)
+45. Level balancing is pan-aware by profile; wider-panned tracks can receive profile-specific relief
+46. Levels cards now show per-track pan value and pan-relief amount used in the recommendation
+47. Levels tab now shows an Apply Preview block (largest predicted boosts/cuts and root moves) before applying
 
 ## Audio Item Rule
 

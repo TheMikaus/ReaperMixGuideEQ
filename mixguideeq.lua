@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.34.1
+-- @version 0.35.1
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.34.1",
+  version = "0.35.1",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
@@ -37,21 +37,25 @@ local VOLUME_PROFILES = {
     name = "Even",
     description = "Balanced stems with moderate role separation.",
     role_offsets = { drums = -1.0, guitar = -1.5, bass = -1.0, vocals = 0.0 },
+    pan_relief_max_db = { drums = 0.25, guitar = 0.35, bass = 0.05, vocals = 0.00 },
   },
   pop = {
     name = "Pop",
     description = "Vocals forward, controlled low-end and guitars.",
     role_offsets = { drums = -1.5, guitar = -2.0, bass = -2.0, vocals = 1.0 },
+    pan_relief_max_db = { drums = 0.20, guitar = 0.20, bass = 0.00, vocals = 0.00 },
   },
   rock = {
     name = "Rock",
     description = "Punchy drums and guitars, vocals slightly tucked.",
     role_offsets = { drums = 0.0, guitar = -0.5, bass = -1.0, vocals = -0.5 },
+    pan_relief_max_db = { drums = 0.35, guitar = 0.75, bass = 0.10, vocals = 0.15 },
   },
   edm = {
     name = "EDM",
     description = "Low-end and vocal focus with lean mids.",
     role_offsets = { drums = -0.5, guitar = -2.5, bass = 0.0, vocals = 0.5 },
+    pan_relief_max_db = { drums = 0.25, guitar = 0.50, bass = 0.05, vocals = 0.10 },
   },
 }
 local BAND_TYPE_CODE = {
@@ -315,13 +319,28 @@ end
 local function get_profile_emphasis_for_role(profile_name, role)
   local profile = get_volume_profile(profile_name)
   local offset = (profile.role_offsets and profile.role_offsets[role]) or 0
+  local pan_relief = (profile.pan_relief_max_db and profile.pan_relief_max_db[role]) or 0
+  local base_msg = ""
   if offset >= 0.75 then
-    return profile.name .. " profile: push " .. tostring(role) .. " forward."
+    base_msg = profile.name .. " profile: push " .. tostring(role) .. " forward."
+  elseif offset <= -1.5 then
+    base_msg = profile.name .. " profile: keep " .. tostring(role) .. " more tucked."
+  else
+    base_msg = profile.name .. " profile: keep " .. tostring(role) .. " near neutral."
   end
-  if offset <= -1.5 then
-    return profile.name .. " profile: keep " .. tostring(role) .. " more tucked."
+  if pan_relief > 0 then
+    base_msg = base_msg .. string.format(" Pan-aware relief up to %.2f dB for wider panning.", pan_relief)
   end
-  return profile.name .. " profile: keep " .. tostring(role) .. " near neutral."
+  return base_msg
+end
+
+local function get_pan_relief_db(profile, role, pan)
+  local max_relief = 0.0
+  if profile and profile.pan_relief_max_db then
+    max_relief = tonumber(profile.pan_relief_max_db[role]) or 0.0
+  end
+  local pan_amount = clamp(math.abs(tonumber(pan) or 0.0), 0.0, 1.0)
+  return pan_amount * max_relief
 end
 
 local function get_child_balance_offset(role, track_name)
@@ -1317,11 +1336,18 @@ local function analyze_volume_report(profile_name)
             groups_by_root[root_guid] = group
           end
 
+          local pan = tonumber(reaper.GetMediaTrackInfo_Value(track, "D_PAN") or 0.0) or 0.0
+          local current_db = vol_to_db(reaper.GetMediaTrackInfo_Value(track, "D_VOL") or 1.0)
+          local pan_relief_db = get_pan_relief_db(profile, role, pan)
+
           group.entries[#group.entries + 1] = {
             guid = item.guid,
             name = item.display_name,
             base_name = item.name,
-            current_db = vol_to_db(reaper.GetMediaTrackInfo_Value(track, "D_VOL") or 1.0),
+            pan = pan,
+            pan_relief_db = pan_relief_db,
+            current_db = current_db,
+            effective_db = current_db - pan_relief_db,
             is_root = item.is_root == true,
           }
         end
@@ -1329,12 +1355,15 @@ local function analyze_volume_report(profile_name)
     end
 
     for _, group in pairs(groups_by_root) do
-      local values = {}
+      local values_raw = {}
+      local values_effective = {}
       for _, entry in ipairs(group.entries) do
-        values[#values + 1] = entry.current_db
+        values_raw[#values_raw + 1] = entry.current_db
+        values_effective[#values_effective + 1] = entry.effective_db or entry.current_db
       end
-      group.current_db = median(values) or -18.0
-      all_group_medians[#all_group_medians + 1] = { role = role, db = group.current_db }
+      group.current_db = median(values_raw) or -18.0
+      group.effective_db = median(values_effective) or group.current_db
+      all_group_medians[#all_group_medians + 1] = { role = role, db = group.effective_db }
       row.groups[#row.groups + 1] = group
     end
 
@@ -1368,7 +1397,7 @@ local function analyze_volume_report(profile_name)
     row.target_role_db = reference_db + role_offset
 
     for _, group in ipairs(row.groups) do
-      group.group_delta_db = clamp(row.target_role_db - group.current_db, -MAX_ROOT_DELTA_DB, MAX_ROOT_DELTA_DB)
+      group.group_delta_db = clamp(row.target_role_db - group.effective_db, -MAX_ROOT_DELTA_DB, MAX_ROOT_DELTA_DB)
       if math.abs(group.group_delta_db) < MIN_APPLY_DELTA_DB then
         group.group_delta_db = 0.0
       end
@@ -1387,7 +1416,7 @@ local function analyze_volume_report(profile_name)
 
       for _, track_row in ipairs(group.entries) do
         local child_offset, reason = get_child_balance_offset(row.role, track_row.base_name or track_row.name)
-        local child_target_db = group.current_db + child_offset
+        local child_target_db = group.current_db + child_offset + (track_row.pan_relief_db or 0.0)
         local child_delta_db = clamp(child_target_db - track_row.current_db, -MAX_CHILD_DELTA_DB, MAX_CHILD_DELTA_DB)
         if math.abs(child_delta_db) < MIN_APPLY_DELTA_DB then
           child_delta_db = 0.0
@@ -1408,6 +1437,8 @@ local function analyze_volume_report(profile_name)
           guid = track_row.guid,
           name = track_row.name,
           root_guid = group.root_guid,
+          pan = track_row.pan,
+          pan_relief_db = track_row.pan_relief_db,
           child_reason = reason,
           current_db = track_row.current_db,
           child_target_db = child_target_db,

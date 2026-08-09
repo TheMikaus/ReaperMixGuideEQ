@@ -90,18 +90,22 @@ local PROFILE_DESCRIPTIONS = {
   Even = {
     "Balanced stems with moderate role separation.",
     "Use when you want neutral, steady role balance.",
+    "Pan-aware level relief is subtle.",
   },
   Pop = {
     "Vocals forward, controlled low-end and guitars.",
     "Use when lead clarity and lyric focus are priority.",
+    "Pan-aware relief stays conservative to keep center focus.",
   },
   Rock = {
     "Punchy drums and guitars, vocals slightly tucked.",
     "Use when rhythm energy should feel more aggressive.",
+    "Pan-aware relief is stronger for wider guitar/drum placement.",
   },
   EDM = {
     "Low-end and vocal focus with lean mids.",
     "Use when kick/bass impact should carry the mix.",
+    "Pan-aware relief supports wide side elements.",
   },
 }
 
@@ -723,6 +727,8 @@ local function draw_volume_report()
           local t = g.entries[i]
           reaper.ImGui_TextDisabled(ctx,
             "- " .. tostring(t.name or "Track")
+            .. string.format(" | pan %.2f", tonumber(t.pan) or 0)
+            .. " | pan relief " .. fmt_db(t.pan_relief_db)
             .. " | child " .. fmt_db(t.child_delta_db)
             .. " (" .. tostring(t.child_reason or "relative balance") .. ")"
             .. " | final " .. fmt_db(t.final_preview_delta_db)
@@ -738,6 +744,73 @@ local function draw_volume_report()
     if idx < #roles then
       safe_same_line()
     end
+  end
+end
+
+local function draw_level_preview_summary()
+  if not volume_report then return end
+
+  local tracks = {}
+  for _, action in ipairs(volume_report.track_adjustments or {}) do
+    tracks[#tracks + 1] = action
+  end
+
+  local roots = {}
+  for _, action in ipairs(volume_report.root_adjustments or {}) do
+    roots[#roots + 1] = action
+  end
+
+  table.sort(tracks, function(a, b)
+    return (tonumber(a.final_preview_delta_db) or 0) > (tonumber(b.final_preview_delta_db) or 0)
+  end)
+  table.sort(roots, function(a, b)
+    return math.abs(tonumber(a.delta_db) or 0) > math.abs(tonumber(b.delta_db) or 0)
+  end)
+
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_Text(ctx, "Apply Preview")
+  reaper.ImGui_TextDisabled(ctx, "Largest predicted level moves before writing:")
+
+  local boost_count = 0
+  for _, t in ipairs(tracks) do
+    local d = tonumber(t.final_preview_delta_db) or 0
+    if d > 0.05 then
+      reaper.ImGui_TextDisabled(ctx, "+ " .. tostring(t.name or "Track") .. " " .. fmt_db(d))
+      boost_count = boost_count + 1
+      if boost_count >= 3 then break end
+    end
+  end
+  if boost_count == 0 then
+    reaper.ImGui_TextDisabled(ctx, "+ No significant boosts")
+  end
+
+  local cut_count = 0
+  for i = #tracks, 1, -1 do
+    local t = tracks[i]
+    local d = tonumber(t.final_preview_delta_db) or 0
+    if d < -0.05 then
+      reaper.ImGui_TextDisabled(ctx, "- " .. tostring(t.name or "Track") .. " " .. fmt_db(d))
+      cut_count = cut_count + 1
+      if cut_count >= 3 then break end
+    end
+  end
+  if cut_count == 0 then
+    reaper.ImGui_TextDisabled(ctx, "- No significant cuts")
+  end
+
+  local root_count = 0
+  for _, r in ipairs(roots) do
+    local d = tonumber(r.delta_db) or 0
+    if math.abs(d) >= 0.05 then
+      reaper.ImGui_TextDisabled(ctx,
+        "Root " .. tostring(r.root_name or "Root") .. " " .. fmt_db(d)
+      )
+      root_count = root_count + 1
+      if root_count >= 4 then break end
+    end
+  end
+  if root_count == 0 then
+    reaper.ImGui_TextDisabled(ctx, "Root moves: none")
   end
 end
 
@@ -1046,6 +1119,8 @@ function M.loop()
             end
           end
         end
+        reaper.ImGui_Spacing(ctx)
+        draw_level_preview_summary()
         reaper.ImGui_Spacing(ctx)
         draw_volume_report()
         reaper.ImGui_Spacing(ctx)

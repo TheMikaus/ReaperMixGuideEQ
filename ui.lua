@@ -13,6 +13,9 @@ local suggestion_data = nil
 local suggestions_generated = false
 local apply_report = "Run Generate Suggestions to enable apply."
 local freq_report = nil
+local volume_report = nil
+local volume_profile = "Even"
+local level_apply_report = "Run Analyze Levels to preview level balance."
 local active_results_tab = "analysis"
 local analyze_in_progress = false
 local analyze_progress_pct = 0
@@ -68,6 +71,27 @@ local function load_columns()
   end
   return { drums = {}, guitar = {}, bass = {}, vocals = {} }
 end
+
+local function get_volume_profiles()
+  if fns and fns.get_volume_profiles then
+    local profiles = fns.get_volume_profiles()
+    if profiles and #profiles > 0 then
+      return profiles
+    end
+  end
+  return { "Even", "Pop", "Rock", "EDM" }
+end
+
+local function fmt_db(v)
+  return string.format("%+.2f dB", tonumber(v) or 0)
+end
+
+local PROFILE_DESCRIPTIONS = {
+  Even = "Balanced stems with moderate role separation.",
+  Pop = "Vocals forward, controlled low-end and guitars.",
+  Rock = "Punchy drums and guitars, vocals slightly tucked.",
+  EDM = "Low-end and vocal focus with lean mids.",
+}
 
 local function child_border_flag()
   if reaper.ImGui_ChildFlags_Borders then
@@ -136,6 +160,25 @@ local function is_last_item_hovered()
     return reaper.ImGui_IsItemHovered(ctx)
   end)
   return ok and hovered == true
+end
+
+local function draw_profile_tooltip(profile)
+  if not is_last_item_hovered() then return end
+  if not begin_tooltip_any() then return end
+  if reaper.APIExists("ImGui_PushTextWrapPos") then
+    pcall(function()
+      reaper.ImGui_PushTextWrapPos(ctx, 440)
+    end)
+  end
+  reaper.ImGui_Text(ctx, tostring(profile) .. " profile")
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_TextWrapped(ctx, tostring(PROFILE_DESCRIPTIONS[profile] or "Profile balance mode."))
+  if reaper.APIExists("ImGui_PopTextWrapPos") then
+    pcall(function()
+      reaper.ImGui_PopTextWrapPos(ctx)
+    end)
+  end
+  end_tooltip_any()
 end
 
 local function get_analysis_row(role)
@@ -260,7 +303,7 @@ local function refresh_suggestions()
   end
 
   if fns and fns.build_suggestions then
-    suggestion_data = fns.build_suggestions(strength_pct)
+    suggestion_data = fns.build_suggestions(strength_pct, volume_profile)
     suggestions_generated = true
     active_results_tab = "suggestions"
     set_status("Suggestions generated")
@@ -291,6 +334,24 @@ local function refresh_frequency_report()
     analyze_in_progress = false
     analyze_progress_pct = 0
     set_status("Frequency analysis unavailable")
+  end
+end
+
+local function refresh_volume_report()
+  if not (fns and fns.analyze_volume_report) then
+    volume_report = nil
+    set_status("Volume analysis unavailable")
+    return
+  end
+
+  local report = fns.analyze_volume_report(volume_profile)
+  if report then
+    volume_report = report
+    active_results_tab = "levels"
+    set_status("Volume analysis complete")
+  else
+    volume_report = nil
+    set_status("Volume analysis failed")
   end
 end
 
@@ -330,6 +391,11 @@ local function draw_results_tabs()
       reaper.ImGui_EndTabItem(ctx)
     end
 
+    if reaper.ImGui_BeginTabItem(ctx, "Levels") then
+      active_results_tab = "levels"
+      reaper.ImGui_EndTabItem(ctx)
+    end
+
     reaper.ImGui_EndTabBar(ctx)
     return
   end
@@ -340,6 +406,27 @@ local function draw_results_tabs()
   safe_same_line()
   if reaper.ImGui_Button(ctx, "Suggestions", 110, 0) then
     active_results_tab = "suggestions"
+  end
+  safe_same_line()
+  if reaper.ImGui_Button(ctx, "Levels", 90, 0) then
+    active_results_tab = "levels"
+  end
+end
+
+local function draw_profile_selector()
+  reaper.ImGui_TextDisabled(ctx, "Balance profile:")
+  safe_same_line()
+  local profiles = get_volume_profiles()
+  for i, profile in ipairs(profiles) do
+    local label = (profile == volume_profile and "[" .. profile .. "]") or profile
+    if reaper.ImGui_Button(ctx, label .. "##profile_" .. profile, 86, 0) then
+      volume_profile = profile
+      set_status("Profile set to " .. profile .. " (existing cards kept; regenerate to refresh)")
+    end
+    draw_profile_tooltip(profile)
+    if i < #profiles then
+      safe_same_line()
+    end
   end
 end
 
@@ -360,6 +447,7 @@ local function draw_track_column(role, items, width, height)
           selected_track_guid = item.guid
           selected_track_role = role
           suggestions_generated = false
+          volume_report = nil
         end
       else
         reaper.ImGui_Text(ctx, item.display_name .. suffix)
@@ -400,10 +488,9 @@ end
 
 local function draw_suggestion_column(role, width, height)
   safe_draw_child(role .. "##suggest_column", width, height, function()
-    reaper.ImGui_Text(ctx, title_role(role))
-    reaper.ImGui_Separator(ctx)
-
     if not suggestions_generated or not suggestion_data then
+      reaper.ImGui_Text(ctx, title_role(role))
+      reaper.ImGui_Separator(ctx)
       reaper.ImGui_TextDisabled(ctx, "Generate suggestions")
       return
     end
@@ -417,15 +504,21 @@ local function draw_suggestion_column(role, width, height)
     end
 
     if not row_data then
+      reaper.ImGui_Text(ctx, title_role(role))
+      reaper.ImGui_Separator(ctx)
       reaper.ImGui_TextDisabled(ctx, "No suggestion data")
       return
     end
 
-    if role == "drums" and row_data.track_suggestions and #row_data.track_suggestions > 0 then
+    local profile_used = tostring(row_data.profile or suggestion_data.profile or "Even")
+    reaper.ImGui_Text(ctx, title_role(role) .. " (" .. profile_used .. ")")
+    reaper.ImGui_Separator(ctx)
+
+    if row_data.track_suggestions and #row_data.track_suggestions > 0 then
       for _, track_block in ipairs(row_data.track_suggestions) do
         reaper.ImGui_Spacing(ctx)
         reaper.ImGui_Separator(ctx)
-        reaper.ImGui_Text(ctx, tostring(track_block.name or "Drum Track"))
+        reaper.ImGui_Text(ctx, tostring(track_block.name or "Track"))
         if is_last_item_hovered() then
           draw_analysis_tooltip_for_track(role, track_block.name, track_block.guid)
         end
@@ -453,9 +546,6 @@ local function draw_suggestion_columns()
 
   for idx, role in ipairs(roles) do
     draw_suggestion_column(role, width, height)
-    if role ~= "drums" and is_last_item_hovered() then
-      draw_analysis_tooltip_for_role(role)
-    end
     if idx < #roles then
       safe_same_line()
     end
@@ -546,6 +636,93 @@ local function draw_frequency_report()
   end
 end
 
+local function draw_volume_report()
+  if not volume_report then
+    reaper.ImGui_TextDisabled(ctx, "Run Analyze Levels to generate a report.")
+    return
+  end
+
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_Text(ctx, "Volume Analysis Report (profile: " .. tostring(volume_report.profile or volume_profile) .. ")")
+  reaper.ImGui_TextWrapped(ctx, tostring(volume_report.summary or ""))
+  if volume_report.profile_description and volume_report.profile_description ~= "" then
+    reaper.ImGui_TextDisabled(ctx, tostring(volume_report.profile_description))
+  end
+  reaper.ImGui_TextDisabled(ctx, "Reference loudness anchor: " .. fmt_db(volume_report.reference_db))
+  reaper.ImGui_Spacing(ctx)
+
+  local roles = get_roles()
+  local row_by_role = {}
+  for _, role_row in ipairs(volume_report.rows or {}) do
+    row_by_role[role_row.role] = role_row
+  end
+
+  local avail_x, avail_y = reaper.ImGui_GetContentRegionAvail(ctx)
+  local spacing = 8
+  local total_spacing = spacing * (#roles - 1)
+  local width = (avail_x - total_spacing) / #roles
+  if width < 200 then width = 200 end
+  local height = math.max(260, math.min(440, math.floor(avail_y * 0.58)))
+
+  for idx, role in ipairs(roles) do
+    local role_row = row_by_role[role] or {
+      role = role,
+      analyzed_track_count = 0,
+      excluded_track_count = 0,
+      skipped_track_count = 0,
+      groups = {},
+    }
+
+    safe_draw_child(role .. "##level_column", width, height, function()
+      reaper.ImGui_Text(ctx, title_role(role) .. " Levels")
+      reaper.ImGui_Separator(ctx)
+      reaper.ImGui_TextDisabled(ctx,
+        "Analyzed " .. tostring(role_row.analyzed_track_count or 0)
+        .. " | Excluded " .. tostring(role_row.excluded_track_count or 0)
+        .. " | Skipped " .. tostring(role_row.skipped_track_count or 0)
+      )
+      reaper.ImGui_TextDisabled(ctx, tostring(role_row.profile_note or ""))
+      reaper.ImGui_TextDisabled(ctx, "Role target: " .. fmt_db(role_row.target_role_db))
+
+      if not role_row.groups or #role_row.groups == 0 then
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_TextDisabled(ctx, "No analyzed groups")
+        return
+      end
+
+      for _, g in ipairs(role_row.groups) do
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_Separator(ctx)
+        reaper.ImGui_Text(ctx, tostring(g.root_name or "Root"))
+        reaper.ImGui_TextDisabled(ctx,
+          "Root shift " .. fmt_db(g.group_delta_db) .. " (" .. fmt_db(g.current_db) .. " -> " .. fmt_db(g.target_db) .. ")"
+        )
+        if g.can_apply_root == false then
+          reaper.ImGui_TextDisabled(ctx, "Root excluded: global root shift will be skipped on apply")
+        end
+
+        for i = 1, math.min(6, #(g.entries or {})) do
+          local t = g.entries[i]
+          reaper.ImGui_TextDisabled(ctx,
+            "- " .. tostring(t.name or "Track")
+            .. " | child " .. fmt_db(t.child_delta_db)
+            .. " (" .. tostring(t.child_reason or "relative balance") .. ")"
+            .. " | final " .. fmt_db(t.final_preview_delta_db)
+          )
+        end
+
+        if (g.entries and #g.entries or 0) > 6 then
+          reaper.ImGui_TextDisabled(ctx, "..." .. tostring(#g.entries - 6) .. " more track(s)")
+        end
+      end
+    end)
+
+    if idx < #roles then
+      safe_same_line()
+    end
+  end
+end
+
 local function draw_move_controls(columns)
   if not selected_track_guid then
     reaper.ImGui_TextDisabled(ctx, "Select a track in any column to move it.")
@@ -563,6 +740,7 @@ local function draw_move_controls(columns)
         if moved then
           selected_track_role = role
           suggestions_generated = false
+          volume_report = nil
           set_status(move_msg or ("Track moved to " .. title_role(role)))
         else
           set_status(move_msg or "Could not move track")
@@ -580,6 +758,7 @@ local function draw_move_controls(columns)
       local ok, msg = fns.set_track_excluded(selected_track_guid, not is_excluded)
       if ok then
         suggestions_generated = false
+        volume_report = nil
       end
       set_status(msg or "Track exclusion updated")
     end
@@ -795,6 +974,7 @@ function M.loop()
     reaper.ImGui_Separator(ctx)
     reaper.ImGui_TextWrapped(ctx, "Results")
     draw_results_tabs()
+    draw_profile_selector()
     reaper.ImGui_Spacing(ctx)
 
     if active_results_tab == "analysis" then
@@ -806,19 +986,53 @@ function M.loop()
       reaper.ImGui_Spacing(ctx)
       draw_frequency_report()
     else
-      if analyze_in_progress then
+      if active_results_tab == "suggestions" and analyze_in_progress then
         reaper.ImGui_TextDisabled(ctx, "Wait for analysis to complete before generating suggestions.")
-      elseif freq_report then
+      elseif active_results_tab == "suggestions" and freq_report then
         if reaper.ImGui_Button(ctx, "Generate Suggestions", 160, 0) then
           refresh_suggestions()
         end
-      else
+      elseif active_results_tab == "suggestions" then
         reaper.ImGui_TextDisabled(ctx, "Analyze Frequency first to enable suggestions.")
       end
-      reaper.ImGui_Spacing(ctx)
-      reaper.ImGui_TextWrapped(ctx, "Suggestions by role (displayed below matching columns).")
-      reaper.ImGui_Spacing(ctx)
-      draw_suggestion_columns()
+
+      if active_results_tab == "suggestions" then
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_TextWrapped(ctx, "Suggestions by role (displayed below matching columns).")
+        reaper.ImGui_TextDisabled(ctx, "Profile emphasis: " .. tostring(volume_profile))
+        reaper.ImGui_Spacing(ctx)
+        draw_suggestion_columns()
+      else
+        if reaper.ImGui_Button(ctx, "Analyze Levels", 140, 0) then
+          refresh_volume_report()
+        end
+        safe_same_line()
+        if volume_report and reaper.ImGui_Button(ctx, "Apply Level Balance", 170, 0) then
+          if fns and fns.apply_volume_balance then
+            local ok, summary, errors, refreshed_report = fns.apply_volume_balance(volume_profile)
+            level_apply_report = summary or "Level balance applied"
+            if errors and #errors > 0 then
+              level_apply_report = level_apply_report .. "\n" .. table.concat(errors, "\n")
+            end
+            if refreshed_report then
+              volume_report = refreshed_report
+            else
+              refresh_volume_report()
+            end
+            if ok then
+              set_status("Level balance applied")
+              operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+            else
+              set_status(summary or "Level balance failed")
+              operation_done_msg = "Operation finished with issues: " .. os.date("%H:%M:%S")
+            end
+          end
+        end
+        reaper.ImGui_Spacing(ctx)
+        draw_volume_report()
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_TextWrapped(ctx, level_apply_report)
+      end
     end
 
     if suggestions_generated and suggestion_data then

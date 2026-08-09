@@ -1,4 +1,4 @@
-# MixGuideEQ v0.31.0
+# MixGuideEQ v0.34.0
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -44,6 +44,14 @@ Rule-driven Auto EQ assistant for Reaper.
 38. Hovering a suggestion card now shows an analysis-evidence tooltip with metrics and trigger context
 39. Suggestions cards now show only actionable EQ changes; analysis details moved to hover tooltips
 40. Drum suggestion tooltip evidence now resolves per track (GUID-first) instead of role-wide
+41. Added Levels tab with profile-based volume analysis (Even, Pop, Rock, EDM)
+42. Added hierarchical level recommendations: child-track relative trims inside each root, then root-node trims across roles
+43. Added Apply Level Balance action to write static track/root volume trims with safety clamps and exclusion respect
+44. Suggestions now render per track for all roles (not just drums) in multi-track sessions
+45. Balance profile buttons now show hover tooltips describing each profile goal
+46. Changing balance profile no longer clears existing suggestion/level cards; card headers show the profile used for generation
+47. Profile tooltips are wider for easier readability of profile intent text
+48. Suggestions now meaningfully use profile by adjusting per-role suggestion strength and adding per-track profile level intent hints
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

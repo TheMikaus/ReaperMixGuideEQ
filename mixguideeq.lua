@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.31.0
+-- @version 0.34.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,15 +17,43 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.31.0",
+  version = "0.34.0",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
   last_frequency_report = nil,
+  last_volume_report = nil,
   frequency_analysis_job = nil,
 }
 
 local MAX_RULE_MOVES = 3
+local MIN_TRACK_VOL = 1e-5
+local MAX_TRACK_VOL = 4.0
+local MIN_APPLY_DELTA_DB = 0.05
+local MAX_CHILD_DELTA_DB = 3.0
+local MAX_ROOT_DELTA_DB = 6.0
+local VOLUME_PROFILES = {
+  even = {
+    name = "Even",
+    description = "Balanced stems with moderate role separation.",
+    role_offsets = { drums = -1.0, guitar = -1.5, bass = -1.0, vocals = 0.0 },
+  },
+  pop = {
+    name = "Pop",
+    description = "Vocals forward, controlled low-end and guitars.",
+    role_offsets = { drums = -1.5, guitar = -2.0, bass = -2.0, vocals = 1.0 },
+  },
+  rock = {
+    name = "Rock",
+    description = "Punchy drums and guitars, vocals slightly tucked.",
+    role_offsets = { drums = 0.0, guitar = -0.5, bass = -1.0, vocals = -0.5 },
+  },
+  edm = {
+    name = "EDM",
+    description = "Low-end and vocal focus with lean mids.",
+    role_offsets = { drums = -0.5, guitar = -2.5, bass = 0.0, vocals = 0.5 },
+  },
+}
 local BAND_TYPE_CODE = {
   Band = 0,
   LowShelf = 1,
@@ -236,6 +264,102 @@ local function safe_div(num, den)
     return 0.0
   end
   return num / den
+end
+
+local function clamp(v, lo, hi)
+  return math.max(lo, math.min(hi, v))
+end
+
+local function vol_to_db(vol)
+  local v = tonumber(vol) or 0
+  if v <= 0 then
+    return -150.0
+  end
+  return 20.0 * (math.log(v) / math.log(10.0))
+end
+
+local function db_to_vol(db)
+  return 10.0 ^ ((tonumber(db) or 0) / 20.0)
+end
+
+local function median(values)
+  if not values or #values == 0 then return nil end
+  local sorted = {}
+  for i = 1, #values do
+    sorted[i] = values[i]
+  end
+  table.sort(sorted)
+  local n = #sorted
+  if n % 2 == 1 then
+    return sorted[(n + 1) / 2]
+  end
+  return (sorted[n / 2] + sorted[(n / 2) + 1]) * 0.5
+end
+
+local function normalize_volume_profile_name(profile_name)
+  local key = tostring(profile_name or "even"):lower()
+  if VOLUME_PROFILES[key] then
+    return key
+  end
+  return "even"
+end
+
+local function get_volume_profile(profile_name)
+  return VOLUME_PROFILES[normalize_volume_profile_name(profile_name)]
+end
+
+local function get_volume_profiles()
+  return { "Even", "Pop", "Rock", "EDM" }
+end
+
+local function get_profile_emphasis_for_role(profile_name, role)
+  local profile = get_volume_profile(profile_name)
+  local offset = (profile.role_offsets and profile.role_offsets[role]) or 0
+  if offset >= 0.75 then
+    return profile.name .. " profile: push " .. tostring(role) .. " forward."
+  end
+  if offset <= -1.5 then
+    return profile.name .. " profile: keep " .. tostring(role) .. " more tucked."
+  end
+  return profile.name .. " profile: keep " .. tostring(role) .. " near neutral."
+end
+
+local function get_child_balance_offset(role, track_name)
+  local name = tostring(track_name or "")
+  local lower = name:lower()
+
+  if role == "drums" and eq_rules.detect_drum_subtype then
+    local subtype = eq_rules.detect_drum_subtype(name)
+    if subtype == "kick" then return 0.0, "kick anchor" end
+    if subtype == "snare" then return -0.5, "snare slightly below kick" end
+    if subtype == "toms" then return -1.0, "toms under kick/snare" end
+    if subtype == "overheads" then return -1.5, "overheads as cymbal support" end
+    if subtype == "room" then return -2.0, "room mic kept behind close mics" end
+    return -0.8, "general drum support"
+  end
+
+  if role == "vocals" then
+    if lower:find("back", 1, true) or lower:find("bg", 1, true) or lower:find("harm", 1, true) or lower:find("dbl", 1, true) then
+      return -2.0, "backing vocal support"
+    end
+    return 0.0, "lead vocal anchor"
+  end
+
+  if role == "guitar" then
+    if lower:find("lead", 1, true) or lower:find("solo", 1, true) then
+      return 0.4, "lead guitar foreground"
+    end
+    if lower:find("rhythm", 1, true) then
+      return -0.6, "rhythm guitar support"
+    end
+    return -0.3, "guitar layer balance"
+  end
+
+  if role == "bass" then
+    return 0.0, "bass foundation"
+  end
+
+  return 0.0, "neutral"
 end
 
 local function goertzel_power(samples, freq, sample_rate)
@@ -456,6 +580,7 @@ local function scan_track_entries()
   local depth = 0
   local active_root_name = nil
   local active_root_role = "ignore"
+  local active_root_guid = nil
 
   for i = 0, count - 1 do
     local track = reaper.GetTrack(0, i)
@@ -471,6 +596,7 @@ local function scan_track_entries()
       inferred = guess_role_from_name(name)
       active_root_name = name
       active_root_role = inferred
+      active_root_guid = guid
     else
       display = (active_root_name or "Parent") .. "-" .. name
       if active_root_role ~= "ignore" then
@@ -490,6 +616,9 @@ local function scan_track_entries()
       name = name,
       display_name = display,
       inferred_role = inferred,
+      root_guid = root_level and guid or active_root_guid,
+      root_name = root_level and name or (active_root_name or name),
+      is_root = root_level,
       has_audio = has_audio_items(track),
     }
 
@@ -498,6 +627,7 @@ local function scan_track_entries()
       depth = 0
       active_root_name = nil
       active_root_role = "ignore"
+      active_root_guid = nil
     end
   end
 
@@ -556,6 +686,9 @@ local function build_role_columns()
       idx = entry.idx,
       name = entry.name,
       display_name = entry.display_name,
+      root_guid = entry.root_guid,
+      root_name = entry.root_name,
+      is_root = entry.is_root,
       has_audio = entry.has_audio,
       excluded = app.track_excluded[entry.guid] == true,
     }
@@ -968,11 +1101,12 @@ local function apply_rule_to_track(track, role, strength_pct, track_label)
   return true, msg_out
 end
 
-local function build_suggestions(strength_pct)
+local function build_suggestions(strength_pct, profile_name)
   local columns = build_role_columns()
   local roles = get_roles_order()
   local rows = {}
   local total_audio_tracks = 0
+  local profile = get_volume_profile(profile_name)
 
   local analysis_by_role = {}
   if app.last_frequency_report and app.last_frequency_report.rows then
@@ -1001,29 +1135,74 @@ local function build_suggestions(strength_pct)
     end
     total_audio_tracks = total_audio_tracks + #audio_tracks
 
-    local rule = eq_rules.build_rule_set(role, strength_pct)
+    local role_profile_offset = (profile.role_offsets and profile.role_offsets[role]) or 0.0
+    local role_strength_scale = clamp(1.0 + (role_profile_offset * 0.12), 0.75, 1.30)
+    local role_strength_pct = math.floor((tonumber(strength_pct) or 100) * role_strength_scale + 0.5)
+
+    local rule = eq_rules.build_rule_set(role, role_strength_pct)
     local summary = eq_rules.render_summary(rule)
-
-    if role == "drums" then
-      for _, item in ipairs(columns[role]) do
-        if item.has_audio and not item.excluded then
-          local track_rule = eq_rules.build_rule_set(role, strength_pct, {
-            track_name = item.name,
-            track_label = item.display_name,
-          })
-          local lines_for_track = render_applied_rule_lines(track_rule)
-
-          track_suggestions[#track_suggestions + 1] = {
-            guid = item.guid,
-            name = item.display_name,
-            lines = lines_for_track,
-          }
+    local analysis_role_row = analysis_by_role[role]
+    local analysis_track_by_guid = {}
+    local analysis_track_by_name = {}
+    if analysis_role_row and analysis_role_row.tracks then
+      for _, tr in ipairs(analysis_role_row.tracks) do
+        local guid_key = tostring(tr.guid or "")
+        local name_key = tostring(tr.name or "")
+        if guid_key ~= "" then
+          analysis_track_by_guid[guid_key] = tr
+        end
+        if name_key ~= "" then
+          analysis_track_by_name[name_key] = tr
         end
       end
+    end
 
-      if #track_suggestions > 0 then
-        summary = summary .. "\nPer-track drum suggestions enabled."
+    for _, item in ipairs(columns[role]) do
+      if item.has_audio and not item.excluded then
+        local track_rule = eq_rules.build_rule_set(role, role_strength_pct, {
+          track_name = item.name,
+          track_label = item.display_name,
+        })
+        local lines_for_track = render_applied_rule_lines(track_rule)
+
+        if math.abs(role_profile_offset) >= 0.25 then
+          lines_for_track[#lines_for_track + 1] = string.format("Profile level intent: %+.1f dB", role_profile_offset)
+        end
+
+        local analysis_track = analysis_track_by_guid[tostring(item.guid)]
+          or analysis_track_by_name[tostring(item.display_name)]
+        if analysis_track and analysis_track.recommendations then
+          local analysis_lines = {}
+          for _, rec in ipairs(analysis_track.recommendations) do
+            local rec_text = tostring(rec or "")
+            if rec_text ~= ""
+              and not rec_text:find("No strong corrective", 1, true)
+              and not rec_text:find("No recommendation", 1, true)
+            then
+              analysis_lines[#analysis_lines + 1] = rec_text
+            end
+            if #analysis_lines >= MAX_RULE_MOVES then
+              break
+            end
+          end
+          if #analysis_lines > 0 then
+            lines_for_track = {}
+            for i = 1, #analysis_lines do
+              lines_for_track[#lines_for_track + 1] = string.format("Analysis move %d: %s", i, analysis_lines[i])
+            end
+          end
+        end
+
+        track_suggestions[#track_suggestions + 1] = {
+          guid = item.guid,
+          name = item.display_name,
+          lines = lines_for_track,
+        }
       end
+    end
+
+    if #track_suggestions > 0 then
+      summary = summary .. "\nPer-track suggestions enabled."
     end
     if role == "drums" then
       local parts = {}
@@ -1039,7 +1218,6 @@ local function build_suggestions(strength_pct)
     end
 
     local lines = render_applied_rule_lines(rule)
-    local analysis_role_row = analysis_by_role[role]
     if analysis_role_row and analysis_role_row.tracks then
       local counts = {}
       for _, tr in ipairs(analysis_role_row.tracks) do
@@ -1074,8 +1252,12 @@ local function build_suggestions(strength_pct)
       end
     end
 
+    summary = summary .. "\n" .. get_profile_emphasis_for_role(profile.name, role)
+    summary = summary .. string.format("\nProfile suggestion strength scale: %.2fx", role_strength_scale)
+
     rows[#rows + 1] = {
       role = role,
+      profile = profile.name,
       audio_track_count = #audio_tracks,
       audio_tracks = audio_tracks,
       excluded_track_count = #excluded_tracks,
@@ -1090,7 +1272,241 @@ local function build_suggestions(strength_pct)
     columns = columns,
     rows = rows,
     total_audio_tracks = total_audio_tracks,
+    profile = profile.name,
   }
+end
+
+local function analyze_volume_report(profile_name)
+  local profile = get_volume_profile(profile_name)
+  local columns = build_role_columns()
+  local roles = get_roles_order()
+  local rows = {}
+  local all_group_medians = {}
+
+  for _, role in ipairs(roles) do
+    local groups_by_root = {}
+    local row = {
+      role = role,
+      profile_note = get_profile_emphasis_for_role(profile.name, role),
+      analyzed_track_count = 0,
+      excluded_track_count = 0,
+      skipped_track_count = 0,
+      groups = {},
+    }
+
+    for _, item in ipairs(columns[role]) do
+      if item.excluded then
+        row.excluded_track_count = row.excluded_track_count + 1
+      elseif not item.has_audio then
+        row.skipped_track_count = row.skipped_track_count + 1
+      else
+        local track = get_track_by_guid(item.guid)
+        if not track then
+          row.skipped_track_count = row.skipped_track_count + 1
+        else
+          row.analyzed_track_count = row.analyzed_track_count + 1
+          local root_guid = item.root_guid or item.guid
+          local group = groups_by_root[root_guid]
+          if not group then
+            group = {
+              role = role,
+              root_guid = root_guid,
+              root_name = item.root_name or item.name or item.display_name,
+              entries = {},
+            }
+            groups_by_root[root_guid] = group
+          end
+
+          group.entries[#group.entries + 1] = {
+            guid = item.guid,
+            name = item.display_name,
+            base_name = item.name,
+            current_db = vol_to_db(reaper.GetMediaTrackInfo_Value(track, "D_VOL") or 1.0),
+            is_root = item.is_root == true,
+          }
+        end
+      end
+    end
+
+    for _, group in pairs(groups_by_root) do
+      local values = {}
+      for _, entry in ipairs(group.entries) do
+        values[#values + 1] = entry.current_db
+      end
+      group.current_db = median(values) or -18.0
+      all_group_medians[#all_group_medians + 1] = { role = role, db = group.current_db }
+      row.groups[#row.groups + 1] = group
+    end
+
+    table.sort(row.groups, function(a, b)
+      return tostring(a.root_name or "") < tostring(b.root_name or "")
+    end)
+    rows[#rows + 1] = row
+  end
+
+  local vocal_refs = {}
+  for _, item in ipairs(all_group_medians) do
+    if item.role == "vocals" then
+      vocal_refs[#vocal_refs + 1] = item.db
+    end
+  end
+  local reference_db = median(vocal_refs)
+  if not reference_db then
+    local all_refs = {}
+    for _, item in ipairs(all_group_medians) do
+      all_refs[#all_refs + 1] = item.db
+    end
+    reference_db = median(all_refs) or -18.0
+  end
+
+  local root_adjustments = {}
+  local track_adjustments = {}
+  local total_nonzero = 0
+
+  for _, row in ipairs(rows) do
+    local role_offset = (profile.role_offsets and profile.role_offsets[row.role]) or 0.0
+    row.target_role_db = reference_db + role_offset
+
+    for _, group in ipairs(row.groups) do
+      group.group_delta_db = clamp(row.target_role_db - group.current_db, -MAX_ROOT_DELTA_DB, MAX_ROOT_DELTA_DB)
+      if math.abs(group.group_delta_db) < MIN_APPLY_DELTA_DB then
+        group.group_delta_db = 0.0
+      end
+      group.target_db = group.current_db + group.group_delta_db
+      group.can_apply_root = app.track_excluded[group.root_guid] ~= true
+
+      root_adjustments[#root_adjustments + 1] = {
+        role = row.role,
+        root_guid = group.root_guid,
+        root_name = group.root_name,
+        current_db = group.current_db,
+        target_db = group.target_db,
+        delta_db = group.group_delta_db,
+        can_apply = group.can_apply_root,
+      }
+
+      for _, track_row in ipairs(group.entries) do
+        local child_offset, reason = get_child_balance_offset(row.role, track_row.base_name or track_row.name)
+        local child_target_db = group.current_db + child_offset
+        local child_delta_db = clamp(child_target_db - track_row.current_db, -MAX_CHILD_DELTA_DB, MAX_CHILD_DELTA_DB)
+        if math.abs(child_delta_db) < MIN_APPLY_DELTA_DB then
+          child_delta_db = 0.0
+        end
+
+        track_row.child_reason = reason
+        track_row.child_target_db = child_target_db
+        track_row.child_delta_db = child_delta_db
+        track_row.final_preview_delta_db = child_delta_db + group.group_delta_db
+        track_row.final_target_db = track_row.current_db + track_row.final_preview_delta_db
+
+        if math.abs(track_row.final_preview_delta_db) >= MIN_APPLY_DELTA_DB then
+          total_nonzero = total_nonzero + 1
+        end
+
+        track_adjustments[#track_adjustments + 1] = {
+          role = row.role,
+          guid = track_row.guid,
+          name = track_row.name,
+          root_guid = group.root_guid,
+          child_reason = reason,
+          current_db = track_row.current_db,
+          child_target_db = child_target_db,
+          child_delta_db = child_delta_db,
+          root_delta_db = group.group_delta_db,
+          final_target_db = track_row.final_target_db,
+          final_preview_delta_db = track_row.final_preview_delta_db,
+        }
+      end
+    end
+  end
+
+  local summary = string.format(
+    "Volume report (%s): reference %.2f dB, %d track adjustment(s), %d root adjustment(s).",
+    profile.name,
+    reference_db,
+    #track_adjustments,
+    #root_adjustments
+  )
+
+  local report = {
+    profile = profile.name,
+    profile_description = profile.description,
+    reference_db = reference_db,
+    summary = summary,
+    rows = rows,
+    track_adjustments = track_adjustments,
+    root_adjustments = root_adjustments,
+    nonzero_adjustments = total_nonzero,
+  }
+  app.last_volume_report = report
+  return report
+end
+
+local function apply_volume_balance(profile_name)
+  local report = analyze_volume_report(profile_name)
+  if not report then
+    return false, "No volume report available.", {}
+  end
+
+  local errors = {}
+  local applied_track_adjustments = 0
+  local applied_root_adjustments = 0
+
+  reaper.Undo_BeginBlock()
+  local apply_ok, apply_err = pcall(function()
+    for _, action in ipairs(report.track_adjustments or {}) do
+      if math.abs(action.child_delta_db or 0) >= MIN_APPLY_DELTA_DB then
+        local track = get_track_by_guid(action.guid)
+        if track then
+          local current_vol = reaper.GetMediaTrackInfo_Value(track, "D_VOL") or 1.0
+          local next_vol = clamp(current_vol * db_to_vol(action.child_delta_db), MIN_TRACK_VOL, MAX_TRACK_VOL)
+          reaper.SetMediaTrackInfo_Value(track, "D_VOL", next_vol)
+          applied_track_adjustments = applied_track_adjustments + 1
+        else
+          errors[#errors + 1] = tostring(action.name) .. ": track not found for child adjustment"
+        end
+      end
+    end
+
+    for _, action in ipairs(report.root_adjustments or {}) do
+      if math.abs(action.delta_db or 0) >= MIN_APPLY_DELTA_DB then
+        if action.can_apply ~= true then
+          errors[#errors + 1] = tostring(action.root_name) .. ": root adjustment skipped (root excluded)"
+        else
+          local root_track = get_track_by_guid(action.root_guid)
+          if root_track then
+            local current_vol = reaper.GetMediaTrackInfo_Value(root_track, "D_VOL") or 1.0
+            local next_vol = clamp(current_vol * db_to_vol(action.delta_db), MIN_TRACK_VOL, MAX_TRACK_VOL)
+            reaper.SetMediaTrackInfo_Value(root_track, "D_VOL", next_vol)
+            applied_root_adjustments = applied_root_adjustments + 1
+          else
+            errors[#errors + 1] = tostring(action.root_name) .. ": root track not found"
+          end
+        end
+      end
+    end
+  end)
+  reaper.Undo_EndBlock("MixGuideEQ: Apply volume balance (" .. tostring(report.profile) .. ")", -1)
+
+  if not apply_ok then
+    errors[#errors + 1] = "Runtime apply error: " .. tostring(apply_err)
+  end
+
+  reaper.TrackList_AdjustWindows(false)
+  reaper.UpdateArrange()
+
+  local summary = string.format(
+    "Applied level balance (%s): %d child track trim(s), %d root trim(s).",
+    tostring(report.profile),
+    applied_track_adjustments,
+    applied_root_adjustments
+  )
+  if #errors > 0 then
+    summary = summary .. " " .. tostring(#errors) .. " issue(s)."
+  end
+
+  local refreshed_report = analyze_volume_report(report.profile)
+  return true, summary, errors, refreshed_report
 end
 
 local function start_frequency_analysis(strength_pct)
@@ -1488,12 +1904,15 @@ end
 
 local fns = {
   get_roles_order = get_roles_order,
+  get_volume_profiles = get_volume_profiles,
   list_role_columns = build_role_columns,
   move_track_to_role = move_track_to_role,
   set_track_excluded = set_track_excluded,
   build_suggestions = build_suggestions,
   apply_mapped_roles = apply_mapped_roles,
   analyze_frequency_report = analyze_frequency_report,
+  analyze_volume_report = analyze_volume_report,
+  apply_volume_balance = apply_volume_balance,
   start_frequency_analysis = start_frequency_analysis,
   step_frequency_analysis = step_frequency_analysis,
   save_project_roles = save_project_roles,

@@ -44,6 +44,14 @@
 33. Hover a Suggestions card to view analysis evidence tooltip (metrics + recommendation trigger context)
 34. Suggestions card body now lists only proposed EQ changes (analysis evidence moved to hover tooltips)
 35. Drum suggestion tooltip evidence is shown per track (hover drum track label)
+36. Levels tab adds profile-based volume analysis (Even, Pop, Rock, EDM)
+37. Volume analysis is hierarchical: track-relative balancing inside each root group, then root-node balancing across roles
+38. Apply Level Balance writes static child/root trims with safeguards and skips excluded roots/tracks
+39. Suggestions render per track for all roles when multiple tracks exist in a role column
+40. Hover any balance profile button to see what that profile is trying to emphasize
+41. Changing balance profile keeps current cards visible; suggestion card headers show the profile used to generate them
+42. Profile tooltips use a wider wrap width for clearer explanation text
+43. Suggestions now adapt to the selected profile via per-role suggestion strength scaling and profile level-intent hints
 
 ## Audio Item Rule
 

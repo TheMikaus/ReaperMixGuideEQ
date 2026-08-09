@@ -16,6 +16,7 @@ local freq_report = nil
 local volume_report = nil
 local volume_profile = "Even"
 local level_apply_report = "Run Analyze Levels to preview level balance."
+local level_snapshot_status = ""
 local active_results_tab = "analysis"
 local analyze_in_progress = false
 local analyze_progress_pct = 0
@@ -391,6 +392,29 @@ local function refresh_volume_report()
     volume_report = nil
     set_status("Volume analysis failed")
   end
+end
+
+local function refresh_level_snapshot_status()
+  if not (fns and fns.get_last_volume_apply_snapshot) then
+    level_snapshot_status = ""
+    return
+  end
+
+  local snap = fns.get_last_volume_apply_snapshot()
+  if not snap or snap.available ~= true then
+    level_snapshot_status = "Revert snapshot: none"
+    return
+  end
+
+  local time_text = ""
+  if snap.timestamp and tonumber(snap.timestamp) then
+    time_text = os.date("%H:%M:%S", tonumber(snap.timestamp))
+  end
+
+  level_snapshot_status = "Revert snapshot: " .. tostring(snap.track_count or 0)
+    .. " track(s)"
+    .. (snap.profile and (", profile " .. tostring(snap.profile)) or "")
+    .. (time_text ~= "" and (", " .. time_text) or "")
 end
 
 local function step_frequency_analysis_job()
@@ -1080,6 +1104,7 @@ function M.loop()
       else
         if reaper.ImGui_Button(ctx, "Analyze Levels", 140, 0) then
           refresh_volume_report()
+          refresh_level_snapshot_status()
         end
         safe_same_line()
         if volume_report and reaper.ImGui_Button(ctx, "Apply Level Balance", 170, 0) then
@@ -1097,12 +1122,37 @@ function M.loop()
             if ok then
               set_status("Level balance applied")
               operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+              refresh_level_snapshot_status()
             else
               set_status(summary or "Level balance failed")
               operation_done_msg = "Operation finished with issues: " .. os.date("%H:%M:%S")
             end
           end
         end
+        safe_same_line()
+        if reaper.ImGui_Button(ctx, "Revert Last Level Apply", 190, 0) then
+          if fns and fns.revert_last_volume_balance then
+            local ok, summary, errors = fns.revert_last_volume_balance()
+            level_apply_report = summary or "Revert attempted"
+            if errors and #errors > 0 then
+              level_apply_report = level_apply_report .. "\n" .. table.concat(errors, "\n")
+            end
+            if ok then
+              set_status("Last level apply reverted")
+              operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+              refresh_level_snapshot_status()
+              refresh_volume_report()
+            else
+              set_status(summary or "Revert failed")
+              operation_done_msg = "Operation finished with issues: " .. os.date("%H:%M:%S")
+            end
+          end
+        end
+        if level_snapshot_status == "" then
+          refresh_level_snapshot_status()
+        end
+        reaper.ImGui_Spacing(ctx)
+        reaper.ImGui_TextDisabled(ctx, level_snapshot_status)
         reaper.ImGui_Spacing(ctx)
         draw_volume_report()
         reaper.ImGui_Spacing(ctx)

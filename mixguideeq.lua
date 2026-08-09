@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.35.4
+-- @version 0.36.0
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,12 +17,13 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.35.4",
+  version = "0.36.0",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
   last_frequency_report = nil,
   last_volume_report = nil,
+  last_volume_apply_snapshot = nil,
   frequency_analysis_job = nil,
 }
 
@@ -1482,6 +1483,31 @@ local function apply_volume_balance(profile_name)
   local errors = {}
   local applied_track_adjustments = 0
   local applied_root_adjustments = 0
+  local snapshot_map = {}
+
+  local function capture_snapshot(guid, label)
+    if not guid or guid == "" then return end
+    if snapshot_map[guid] then return end
+    local tr = get_track_by_guid(guid)
+    if tr then
+      snapshot_map[guid] = {
+        guid = guid,
+        label = tostring(label or guid),
+        vol = reaper.GetMediaTrackInfo_Value(tr, "D_VOL") or 1.0,
+      }
+    end
+  end
+
+  for _, action in ipairs(report.track_adjustments or {}) do
+    if math.abs(action.child_delta_db or 0) >= MIN_APPLY_DELTA_DB then
+      capture_snapshot(action.guid, action.name)
+    end
+  end
+  for _, action in ipairs(report.root_adjustments or {}) do
+    if math.abs(action.delta_db or 0) >= MIN_APPLY_DELTA_DB and action.can_apply == true then
+      capture_snapshot(action.root_guid, action.root_name)
+    end
+  end
 
   reaper.Undo_BeginBlock()
   local apply_ok, apply_err = pcall(function()
@@ -1536,8 +1562,77 @@ local function apply_volume_balance(profile_name)
     summary = summary .. " " .. tostring(#errors) .. " issue(s)."
   end
 
+  local snapshot_list = {}
+  for _, row in pairs(snapshot_map) do
+    snapshot_list[#snapshot_list + 1] = row
+  end
+  table.sort(snapshot_list, function(a, b)
+    return tostring(a.label) < tostring(b.label)
+  end)
+
+  app.last_volume_apply_snapshot = {
+    profile = report.profile,
+    timestamp = os.time(),
+    tracks = snapshot_list,
+  }
+
+  summary = summary .. " Snapshot captured for " .. tostring(#snapshot_list) .. " track(s)."
+
   local refreshed_report = analyze_volume_report(report.profile)
   return true, summary, errors, refreshed_report
+end
+
+local function get_last_volume_apply_snapshot()
+  local snap = app.last_volume_apply_snapshot
+  if not snap then
+    return { available = false, track_count = 0 }
+  end
+  return {
+    available = true,
+    track_count = #(snap.tracks or {}),
+    profile = snap.profile,
+    timestamp = snap.timestamp,
+  }
+end
+
+local function revert_last_volume_balance()
+  local snap = app.last_volume_apply_snapshot
+  if not snap or not snap.tracks or #snap.tracks == 0 then
+    return false, "No level-apply snapshot available to revert.", {}
+  end
+
+  local restored = 0
+  local errors = {}
+
+  reaper.Undo_BeginBlock()
+  local ok, err = pcall(function()
+    for _, row in ipairs(snap.tracks) do
+      local tr = get_track_by_guid(row.guid)
+      if tr then
+        reaper.SetMediaTrackInfo_Value(tr, "D_VOL", clamp(tonumber(row.vol) or 1.0, MIN_TRACK_VOL, MAX_TRACK_VOL))
+        restored = restored + 1
+      else
+        errors[#errors + 1] = tostring(row.label or row.guid) .. ": track not found during revert"
+      end
+    end
+  end)
+  reaper.Undo_EndBlock("MixGuideEQ: Revert last level balance", -1)
+
+  if not ok then
+    errors[#errors + 1] = "Runtime revert error: " .. tostring(err)
+  end
+
+  reaper.TrackList_AdjustWindows(false)
+  reaper.UpdateArrange()
+
+  app.last_volume_report = nil
+  app.last_volume_apply_snapshot = nil
+
+  local summary = "Reverted level balance on " .. tostring(restored) .. " track(s)."
+  if #errors > 0 then
+    summary = summary .. " " .. tostring(#errors) .. " issue(s)."
+  end
+  return true, summary, errors
 end
 
 local function start_frequency_analysis(strength_pct)
@@ -1944,6 +2039,8 @@ local fns = {
   analyze_frequency_report = analyze_frequency_report,
   analyze_volume_report = analyze_volume_report,
   apply_volume_balance = apply_volume_balance,
+  get_last_volume_apply_snapshot = get_last_volume_apply_snapshot,
+  revert_last_volume_balance = revert_last_volume_balance,
   start_frequency_analysis = start_frequency_analysis,
   step_frequency_analysis = step_frequency_analysis,
   save_project_roles = save_project_roles,

@@ -1,4 +1,4 @@
-# MixGuideEQ v0.35.4
+# MixGuideEQ v0.36.0
 
 Rule-driven Auto EQ assistant for Reaper.
 
@@ -60,6 +60,9 @@ Rule-driven Auto EQ assistant for Reaper.
 54. Increased default main window height for better card visibility
 55. Levels role cards now include per-column preview highlights (top boost/cut and root move) for tracks in that role
 56. Levels per-track output now uses compact wrapped formatting to reduce required window width
+57. Added one-click Revert Last Level Apply with per-apply snapshot capture for A/B safety
+58. Levels tab now shows snapshot status (track count, profile, time) to confirm revert availability
+59. Added practical profile calibration workflow support through repeatable analyze/apply/revert loop
 11. Layout refinement: +300px height, bottom row alignment for Save/Reload/Install, and taller suggestion panels
 
 ## Requirements

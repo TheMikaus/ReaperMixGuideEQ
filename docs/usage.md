@@ -60,6 +60,9 @@
 49. Default window first-open height is taller for improved multi-card visibility
 50. Each Levels role card now includes preview highlights for that role (top boost/cut and root move)
 51. Levels result lines are now compact/wrapped to reduce horizontal space needs
+52. Revert Last Level Apply restores pre-apply track volumes from a captured snapshot
+53. Levels tab displays snapshot availability/status so you can confirm revert readiness
+54. Recommended calibration loop: Analyze Levels -> Apply Level Balance -> listen -> Revert -> tweak profile -> repeat
 
 ## Audio Item Rule
 

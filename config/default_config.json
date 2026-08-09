@@ -1,5 +1,5 @@
 {
-  "version": "0.36.1",
+  "version": "0.36.2",
   "default_role": "vocals",
   "default_strength_pct": 100,
   "notes": "0.X.0 versioning scheme where X tracks feature count in each pass"

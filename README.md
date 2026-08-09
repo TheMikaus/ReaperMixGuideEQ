@@ -1,4 +1,4 @@
-# MixGuideEQ v0.36.1
+# MixGuideEQ v0.36.2
 
 MixGuideEQ is a Reaper assistant that helps you:
 
@@ -30,6 +30,51 @@ MixGuideEQ is a Reaper assistant that helps you:
 6. Open Levels tab, pick a balance profile, run Analyze Levels.
 7. Review Volume Adjustment Preview at top of each role card.
 8. Apply Level Balance, listen, then use Revert Last Level Apply for A/B if needed.
+
+### Expected Project Layout
+
+MixGuideEQ works best when your Reaper project follows a stem-style layout:
+
+- Root folders (top-level tracks) represent major instrument groups.
+- Child tracks under each root are parts/layers for that instrument group.
+- Typical roots are drums, guitars, bass, and vocals.
+- Audio-bearing tracks should be included; utility tracks (click, guides, refs) should usually be excluded.
+
+Example structure:
+
+- Drums (root)
+	- Kick In
+	- Kick Out
+	- Snare Top
+	- Overheads L/R
+- Guitars (root)
+	- Rhythm L
+	- Rhythm R
+	- Lead
+- Bass (root)
+	- DI
+	- Amp
+- Vocals (root)
+	- Lead Vox
+	- BGV Stack
+
+### How Mapping Into Categories Works
+
+MixGuideEQ maps each track into one of four categories: Drums, Guitar, Bass, Vox.
+
+- Root-level inference:
+	- Track/folder names are scanned for keywords.
+	- Examples: kick/snare/tom/hat/cym/overhead/room -> Drums; guitar/gtr -> Guitar; bass -> Bass; vox/vocal -> Vox.
+- Child inheritance:
+	- Child tracks inherit their active root folder role when possible.
+- Fallback behavior:
+	- If a role cannot be inferred, it falls back to Vox (safe default).
+- Manual override:
+	- You can move any selected track between columns at any time.
+- Exclusion control:
+	- Excluded tracks are ignored by suggestion counts, EQ apply, and level apply.
+
+Tip: Do one mapping pass first, then run analysis. If you remap many tracks, re-run Analyze for best results.
 
 ## What To Expect In Current Version
 

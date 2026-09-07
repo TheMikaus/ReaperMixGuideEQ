@@ -1632,6 +1632,8 @@ local function draw_frame()
 
   local title = "MixGuideEQ v" .. tostring(md_ref.version or "")
   local visible, open = reaper.ImGui_Begin(ctx, title, true)
+  dbg("Begin '" .. title .. "' -> visible=" .. tostring(visible)
+    .. " open=" .. tostring(open))
 
   if visible then
     -- Everything above the footer scrolls inside this region, so the footer
@@ -1676,7 +1678,18 @@ local function draw_frame()
     draw_footer()
   end
 
-  reaper.ImGui_End(ctx)
+  -- End only when Begin returned true.
+  --
+  -- Collapsing the window (double-click the title bar) made Begin return false
+  -- and this throw "Calling End() too many times", with the ui debug log
+  -- showing a frame that contained nothing else at all. So on this binding a
+  -- collapsed window returns false *without pushing*, exactly as a culled
+  -- child does -- see the EndChild note in safe_draw_child. Upstream Dear ImGui
+  -- says to call End unconditionally; this binding does not behave that way,
+  -- so do not "correct" it back.
+  if visible then
+    reaper.ImGui_End(ctx)
+  end
 
   if should_close_window then
     should_close_window = false

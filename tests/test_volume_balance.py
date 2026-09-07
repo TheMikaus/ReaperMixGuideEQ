@@ -16,6 +16,76 @@ def band(mixguideeq):
     return mixguideeq
 
 
+# -- the clip guard ----------------------------------------------------------
+#
+# A track loud enough to cross the ceiling after its move used to cost the
+# whole project: the guard took the excess off every move, on the grounds that
+# the balance is a set of relative positions so shifting them together is free.
+# It is not free -- it undoes the zero-mean directly above it and leaves the
+# mix quieter. A real pass lost 2.93 dB across the board to one hot drum track.
+
+
+@pytest.fixture
+def hot(mixguideeq):
+    """The shape of the real project that exposed this: a loud track inside a
+    folder whose own fader is pushing it, so the child arrives above the
+    ceiling on inherited gain rather than on its own move."""
+    mixguideeq.add_track("Drums", folder_depth=1, items=0, vol=2.0)   # +6 dB
+    mixguideeq.add_track("Kick", partials=[(60, 0.9)])
+    mixguideeq.add_track("Snare", folder_depth=-1, partials=[(200, 0.5)])
+    mixguideeq.add_track("Bass DI", partials=[(80, 0.05)])
+    mixguideeq.add_track("Lead Vox", partials=[(500, 0.2)])
+    mixguideeq.add_track("Gtr", partials=[(900, 0.2)])
+    mixguideeq.fns.list_role_columns()
+    return mixguideeq
+
+
+def mean_move(report):
+    moves = [r["delta_db"] for r in report["ranked"].values()]
+    return sum(moves) / len(moves)
+
+
+def moves_by_name(report):
+    return {r["name"]: r["delta_db"] for r in report["ranked"].values()}
+
+
+def test_the_guard_actually_fires_for_this_fixture(hot):
+    """Without this the three tests below could pass by never triggering."""
+    report = hot.fns.analyze_volume_report("Even")
+    assert report["predicted_peak_db"] > -1.0, (
+        "the guard never engages here, so it is not being tested (peak %.2f dB)"
+        % report["predicted_peak_db"]
+    )
+
+
+def test_the_guard_does_not_attenuate_the_whole_mix(hot):
+    report = hot.fns.analyze_volume_report("Even")
+    assert mean_move(report) == pytest.approx(0.0, abs=0.3), (
+        "the plan is attenuating by %.2f dB on average, not balancing"
+        % mean_move(report)
+    )
+
+
+def test_a_track_that_would_clip_is_trimmed(hot):
+    report = hot.fns.analyze_volume_report("Even")
+    moves = moves_by_name(report)
+    peaks = {r["name"]: r["peak_db"] for r in report["ranked"].values()}
+    for name, move in moves.items():
+        assert peaks[name] + move <= 0.0, (
+            "%s is planned to peak at %.2f dB" % (name, peaks[name] + move)
+        )
+
+
+def test_only_the_hot_track_pays_for_its_own_peak(hot):
+    """The quiet tracks still get the boost the balance asked for."""
+    report = hot.fns.analyze_volume_report("Even")
+    moves = moves_by_name(report)
+    assert moves["Bass DI"] > 0.0, (
+        "the quietest track was cut (%.2f dB) to protect the loudest"
+        % moves["Bass DI"]
+    )
+
+
 def test_apply_changes_volumes(band):
     before = dict(band.rmock.volumes())
     ok, summary, _errors, _report = band.fns.apply_volume_balance("Even")

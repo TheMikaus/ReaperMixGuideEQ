@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.46.3
+-- @version 0.46.4
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.46.3",
+  version = "0.46.4",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
@@ -2530,34 +2530,53 @@ local function analyze_volume_report(profile_name)
 
   -- Clip guard.
   --
-  -- Balancing preserves the average level, which means a track can still come
-  -- up far enough to push the mix into clipping. Predict the loudest post-move
-  -- peak and, if it crosses the ceiling, take the excess off every move -- the
-  -- balance is a set of *relative* positions, so shifting them together keeps
-  -- the mix intact while buying back headroom.
+  -- Only the track that would actually cross the ceiling is trimmed back to
+  -- it. This used to take the excess off *every* move on the grounds that the
+  -- balance is a set of relative positions, so shifting them together is free.
+  -- It is not free: it undoes the levelling immediately above and leaves the
+  -- whole mix quieter, which is the "everything got quieter" complaint in
+  -- mechanical form. A real pass lost 2.93 dB across the board to one drum
+  -- track running hot.
+  --
+  -- A track only clips itself, and a track being cut cannot clip at all. If a
+  -- whole folder is running hot, the folder's own fader is the place to fix
+  -- that -- so the guard names the inherited gain rather than quietly paying
+  -- for it on every other track in the project.
   local predicted_peak = -math.huge
   for _, row in ipairs(measured) do
     local peak = (row.peak_db or row.max_db) + row.delta_db + row.inherited_db
     if peak > predicted_peak then predicted_peak = peak end
   end
 
+  local clip_trims = {}
   local clip_trim_db = 0.0
-  if predicted_peak > PEAK_CEILING_DB then
-    clip_trim_db = PEAK_CEILING_DB - predicted_peak
-    for _, row in ipairs(measured) do
-      row.delta_db = row.delta_db + clip_trim_db
+  for _, row in ipairs(measured) do
+    local peak = (row.peak_db or row.max_db) + row.delta_db + row.inherited_db
+    if peak > PEAK_CEILING_DB then
+      local trim = PEAK_CEILING_DB - peak
+      row.delta_db = row.delta_db + trim
       row.target_db = row.avg_db + row.delta_db
+      clip_trims[tostring(row.guid)] = trim
+      -- The deepest single trim, for the report.
+      if trim < clip_trim_db then clip_trim_db = trim end
+      alogf("CLIP GUARD %-26s would peak %+.2f dB (inherited %+.2f dB from its "
+        .. "folder); trimmed %.2f dB", tostring(row.name), peak,
+        row.inherited_db, trim)
     end
+  end
+
+  if next(clip_trims) ~= nil then
     for _, action in ipairs(track_adjustments) do
-      action.delta_db = action.delta_db + clip_trim_db
-      action.child_delta_db = action.delta_db
-      action.final_preview_delta_db = action.delta_db
-      action.target_db = action.target_db + clip_trim_db
+      local trim = clip_trims[tostring(action.guid)]
+      if trim then
+        action.delta_db = action.delta_db + trim
+        action.child_delta_db = action.delta_db
+        action.final_preview_delta_db = action.delta_db
+        action.target_db = action.target_db + trim
+      end
     end
-    alogf("CLIP GUARD predicted peak %.2f dB exceeds ceiling %.2f dB; "
-      .. "pulling every move down %.2f dB", predicted_peak, PEAK_CEILING_DB, clip_trim_db)
   else
-    alogf("clip guard: predicted peak %.2f dB, ceiling %.2f dB, no trim needed",
+    alogf("clip guard: loudest predicted peak %.2f dB, ceiling %.2f dB, no trim needed",
       predicted_peak, PEAK_CEILING_DB)
   end
 

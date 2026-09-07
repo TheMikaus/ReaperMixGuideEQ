@@ -1,4 +1,4 @@
-# MixGuideEQ v0.46.3
+# MixGuideEQ v0.46.4
 
 > **Status: the EQ stage is not ready.** Mapping, pan and level balancing are in
 > usable shape. Auto EQ is still producing mixes that come out too quiet, across
@@ -272,3 +272,5 @@ Tip: Do one mapping pass first, then run analysis. If you remap many tracks, re-
 124. Analyze Frequency now actually performs the revert that feature 116 describes. The Levels and Pan buttons undid the stages after them; the EQ one never did, so a re-analysis measured a mix still carrying this panel's pan, level and makeup moves
 125. Apply Level Balance logs every fader it writes - what the plan asked for, the fader before and after, what was actually achieved, and a CLAMPED marker when the write could not take the whole move. A track landing wrong can now be traced to the plan or to the write, which need opposite fixes
 126. Analysis log sections nest, so one operation leaves one log. Apply Level Balance re-measures afterwards, and that pass used to overwrite the plan that produced the moves - leaving only the post-apply reading, the least useful of the three
+127. The clip guard trims only the track that would cross the ceiling, instead of taking the excess off every move. Protecting one hot track used to cost the whole project - a real pass lost 2.93 dB across the board, undoing the zero-mean applied one step earlier. A track only clips itself, and a track being cut cannot clip at all
+128. Collapsing the window no longer kills the panel. On this ReaImGui build a collapsed window's Begin returns false without pushing, so End must be skipped, exactly as it is for a culled child

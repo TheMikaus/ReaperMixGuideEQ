@@ -16,8 +16,17 @@ local freq_report = nil
 local volume_report = nil
 local volume_profile = "Even"
 local level_apply_report = "Run Analyze Levels to preview level balance."
+local pan_report = nil
+local pan_apply_report = "Run Analyze Pan to preview stereo placement."
+local pan_override_existing = false
+local pan_snapshot_status = ""
+local preview_measure_buf = "1"
+-- What the state file last said, so a project switch refreshes the box
+-- without fighting the keystrokes going into it.
+local preview_measure_last_seen = nil
+local eq_apply_in_progress = false
+local eq_apply_progress_pct = 0
 local level_snapshot_status = ""
-local active_results_tab = "analysis"
 local analyze_in_progress = false
 local analyze_progress_pct = 0
 local operation_done_msg = ""
@@ -29,12 +38,89 @@ local show_update_panel_inline = false
 local should_close_window = false
 
 local HAS_POPUP_MODAL_API = reaper.APIExists("ImGui_BeginPopupModal") and reaper.APIExists("ImGui_OpenPopup")
-local HAS_SETCURSOR_API = reaper.APIExists("ImGui_SetCursorPosX") and reaper.APIExists("ImGui_SetCursorPosY")
-local HAS_TABBAR_API = reaper.APIExists("ImGui_BeginTabBar") and reaper.APIExists("ImGui_BeginTabItem")
 
 local function set_status(msg)
   status_msg = msg
   status_expiry = reaper.time_precise() + 3.0
+end
+
+-- ── debug log ───────────────────────────────────────────────────────────────
+--
+-- Ring buffer in memory, flushed to disk the first time something throws. The
+-- interesting part is the sequence of Begin/End calls immediately before the
+-- failure, not the thousands of healthy frames before that.
+-- Set false to silence the per-call trace. Errors still write a log with the
+-- environment header, which is usually enough to say which build is running.
+local DEBUG_ENABLED = true
+local DEBUG_RING_MAX = 900
+local debug_ring = {}
+local debug_seq = 0
+local debug_frame = 0
+local debug_flushed = false
+
+local function dbg(text)
+  if not DEBUG_ENABLED then return end
+  debug_seq = debug_seq + 1
+  debug_ring[#debug_ring + 1] = string.format("%06d f%05d %s", debug_seq, debug_frame, tostring(text))
+  if #debug_ring > DEBUG_RING_MAX then
+    table.remove(debug_ring, 1)
+  end
+end
+
+local function debug_log_path()
+  local dir = reaper.GetResourcePath() .. "/Scripts/MixGuideEQ"
+  pcall(function() reaper.RecursiveCreateDirectory(dir, 0) end)
+  return dir .. "/mixguideeq_ui_debug.log"
+end
+
+local function debug_environment()
+  local lines = {}
+  local ok, version = pcall(function()
+    return reaper.ImGui_GetVersion and reaper.ImGui_GetVersion() or "unknown"
+  end)
+  lines[#lines + 1] = "reaimgui version: " .. tostring(ok and version or "unavailable")
+  lines[#lines + 1] = "ImGui_ChildFlags_Borders: " .. tostring(reaper.ImGui_ChildFlags_Borders ~= nil)
+  lines[#lines + 1] = "ImGui_ChildFlags_Border:  " .. tostring(reaper.ImGui_ChildFlags_Border ~= nil)
+  lines[#lines + 1] = "ImGui_ValidatePtr:        " .. tostring(reaper.ImGui_ValidatePtr ~= nil)
+  return table.concat(lines, "\n")
+end
+
+local function dbg_flush(reason)
+  if debug_flushed then return end
+  debug_flushed = true
+  pcall(function()
+    local file = io.open(debug_log_path(), "w")
+    if not file then return end
+    file:write("MixGuideEQ UI debug log\n")
+    file:write("written: " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+    file:write("reason:  " .. tostring(reason) .. "\n")
+    file:write(debug_environment() .. "\n")
+    file:write(string.rep("-", 60) .. "\n")
+    for _, line in ipairs(debug_ring) do
+      file:write(line .. "\n")
+    end
+    file:close()
+  end)
+end
+
+-- Work deferred until after the ImGui frame closes.
+--
+-- Applying levels, pans or EQ calls TrackList_AdjustWindows and UpdateArrange,
+-- which pump Reaper's own UI. Doing that between ImGui_Begin and ImGui_End
+-- invalidates the context, and every ImGui call for the rest of the frame
+-- throws. Button handlers queue their work here instead; M.loop runs it once
+-- the frame has ended.
+local pending_action = nil
+
+local function queue_action(fn)
+  pending_action = fn
+end
+
+local function run_pending_action()
+  if not pending_action then return end
+  local action = pending_action
+  pending_action = nil
+  pcall(action)
 end
 
 local function has_valid_ctx()
@@ -50,6 +136,35 @@ local function has_valid_ctx()
     end
   end
   return true
+end
+
+-- Text that gives up quietly rather than throwing. Minimise, collapse and
+-- resize can invalidate the context part-way through a frame, and an error path
+-- that calls ImGui itself just throws again from inside the handler.
+local function safe_text(text, disabled)
+  if not has_valid_ctx() then return end
+  pcall(function()
+    if disabled then
+      reaper.ImGui_TextDisabled(ctx, tostring(text))
+    else
+      reaper.ImGui_Text(ctx, tostring(text))
+    end
+  end)
+end
+
+local function safe_spacing()
+  if not has_valid_ctx() then return end
+  pcall(function() reaper.ImGui_Spacing(ctx) end)
+end
+
+local function safe_separator()
+  if not has_valid_ctx() then return end
+  pcall(function() reaper.ImGui_Separator(ctx) end)
+end
+
+local function safe_text_wrapped(text)
+  if not has_valid_ctx() then return end
+  pcall(function() reaper.ImGui_TextWrapped(ctx, tostring(text)) end)
 end
 
 local function title_role(role)
@@ -132,27 +247,34 @@ local function child_border_flag()
   return 1
 end
 
-local function begin_child_any(label, width, height)
-  local attempts = {
-    function()
-      return reaper.ImGui_BeginChild(ctx, label, width, height, child_border_flag())
-    end,
-    function()
-      return reaper.ImGui_BeginChild(ctx, label, width, height, true)
-    end,
-    function()
-      return reaper.ImGui_BeginChild(ctx, label, width, height, true, child_border_flag())
-    end,
-  }
+-- ReaImGui changed BeginChild's fifth argument: 0.9+ takes an integer
+-- child_flags, older builds take a boolean border. Pick from API presence.
+--
+-- Do NOT go back to trying one signature and falling back to another on error.
+-- A BeginChild that throws part-way can still have pushed a child window, so a
+-- second attempt pushes a second one while only a single EndChild follows. The
+-- unbalanced stack then shows up as an EndChild assertion and an invalidated
+-- context several calls later, far from the cause.
+local USES_CHILD_FLAGS =
+  reaper.ImGui_ChildFlags_Borders ~= nil or reaper.ImGui_ChildFlags_Border ~= nil
 
-  for _, fn in ipairs(attempts) do
-    local ok, opened = pcall(fn)
-    if ok then
-      return true, opened
-    end
+local function begin_child_any(label, width, height)
+  local ok, opened
+  if USES_CHILD_FLAGS then
+    ok, opened = pcall(reaper.ImGui_BeginChild, ctx, label, width, height, child_border_flag())
+  else
+    ok, opened = pcall(reaper.ImGui_BeginChild, ctx, label, width, height, true)
   end
 
-  return false, false
+  dbg(string.format("BeginChild '%s' w=%.0f h=%.0f -> ok=%s opened=%s",
+    tostring(label), tonumber(width) or -1, tonumber(height) or -1,
+    tostring(ok), tostring(opened)))
+
+  if not ok then
+    dbg("  BeginChild threw: " .. tostring(opened))
+    return false, false
+  end
+  return true, opened
 end
 
 local function safe_same_line()
@@ -171,15 +293,30 @@ local function begin_tooltip_any()
   local ok, opened = pcall(function()
     return reaper.ImGui_BeginTooltip(ctx)
   end)
+  dbg("BeginTooltip -> ok=" .. tostring(ok) .. " opened=" .. tostring(opened))
   return ok and opened
 end
 
+-- Deliberately NOT guarded by has_valid_ctx().
+--
+-- An End must never be skipped once its Begin succeeded. Bailing out here on a
+-- context that merely *looks* invalid leaves the tooltip window pushed on
+-- ImGui's stack, and the next EndChild then asserts against the tooltip
+-- instead of the child column:
+--
+--   ImGui_EndChild: Assertion failed: child_window->Flags & ImGuiWindowFlags_ChildWindow
+--
+-- pcall is the only protection an End call gets.
 local function end_tooltip_any()
-  if not has_valid_ctx() then return end
   if not reaper.APIExists("ImGui_EndTooltip") then return end
-  pcall(function()
+  local ok, err = pcall(function()
     reaper.ImGui_EndTooltip(ctx)
   end)
+  dbg("EndTooltip -> ok=" .. tostring(ok))
+  if not ok then
+    dbg("  EndTooltip THREW: " .. tostring(err))
+    dbg_flush("EndTooltip threw")
+  end
 end
 
 local function is_last_item_hovered()
@@ -205,16 +342,16 @@ local function draw_profile_tooltip(profile)
   if not begin_profile_tooltip() then return end
   local _ = pcall(function()
     if not has_valid_ctx() then return end
-    reaper.ImGui_Text(ctx, tostring(profile) .. " profile")
-    reaper.ImGui_Separator(ctx)
+    safe_text(tostring(profile) .. " profile")
+    safe_separator()
     local lines = PROFILE_DESCRIPTIONS[profile]
     if type(lines) == "table" then
       for _, line in ipairs(lines) do
         if not has_valid_ctx() then break end
-        reaper.ImGui_Text(ctx, tostring(line))
+        safe_text(tostring(line))
       end
     else
-      reaper.ImGui_Text(ctx, "Profile balance mode.")
+      safe_text("Profile balance mode.")
     end
   end)
   end_tooltip_any()
@@ -235,41 +372,44 @@ local function draw_analysis_tooltip_for_role(role)
   if not row then return end
   if not begin_tooltip_any() then return end
 
-  reaper.ImGui_Text(ctx, title_role(role) .. " analysis evidence")
-  reaper.ImGui_Separator(ctx)
-  reaper.ImGui_TextDisabled(ctx,
-    "Analyzed " .. tostring(row.analyzed_track_count or 0)
-    .. " | Excluded " .. tostring(row.excluded_track_count or 0)
-    .. " | Skipped " .. tostring(row.skipped_track_count or 0)
-  )
+  -- Body in a pcall so end_tooltip_any() always runs. See the note in
+  -- draw_analysis_tooltip_for_track: a leaked tooltip window is what makes a
+  -- later EndChild assert.
+  pcall(function()
+    safe_text(title_role(role) .. " analysis evidence")
+    safe_separator()
+    safe_text("Analyzed " .. tostring(row.analyzed_track_count or 0)
+      .. " | Excluded " .. tostring(row.excluded_track_count or 0)
+      .. " | Skipped " .. tostring(row.skipped_track_count or 0), true)
 
-  local shown = 0
-  for _, tr in ipairs(row.tracks or {}) do
-    if shown >= 3 then break end
-    reaper.ImGui_Spacing(ctx)
-    reaper.ImGui_Text(ctx, tostring(tr.name or "Track"))
-    if tr.metrics then
-      reaper.ImGui_TextDisabled(ctx, string.format(
-        "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
-        tonumber(tr.metrics.avg_rms) or 0,
-        tonumber(tr.metrics.mud_ratio) or 0,
-        tonumber(tr.metrics.presence_ratio) or 0,
-        tonumber(tr.metrics.brightness_ratio) or 0
-      ))
-    else
-      reaper.ImGui_TextDisabled(ctx, tostring(tr.summary or "No metrics"))
+    local shown = 0
+    for _, tr in ipairs(row.tracks or {}) do
+      if shown >= 3 then break end
+      safe_spacing()
+      safe_text(tostring(tr.name or "Track"))
+      if tr.metrics then
+        safe_text(string.format(
+          "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
+          tonumber(tr.metrics.avg_rms) or 0,
+          tonumber(tr.metrics.mud_ratio) or 0,
+          tonumber(tr.metrics.presence_ratio) or 0,
+          tonumber(tr.metrics.brightness_ratio) or 0
+        ), true)
+      else
+        safe_text(tostring(tr.summary or "No metrics"), true)
+      end
+      local rec = (tr.recommendations and tr.recommendations[1]) or ""
+      if rec ~= "" then
+        safe_text("- " .. tostring(rec), true)
+      end
+      shown = shown + 1
     end
-    local rec = (tr.recommendations and tr.recommendations[1]) or ""
-    if rec ~= "" then
-      reaper.ImGui_TextDisabled(ctx, "- " .. tostring(rec))
-    end
-    shown = shown + 1
-  end
 
-  if (row.tracks and #row.tracks or 0) > shown then
-    reaper.ImGui_Spacing(ctx)
-    reaper.ImGui_TextDisabled(ctx, "...hovering card shows first " .. tostring(shown) .. " tracks")
-  end
+    if (row.tracks and #row.tracks or 0) > shown then
+      safe_spacing()
+      safe_text("...hovering card shows first " .. tostring(shown) .. " tracks", true)
+    end
+  end)
 
   end_tooltip_any()
 end
@@ -291,47 +431,74 @@ local function draw_analysis_tooltip_for_track(role, track_name, track_guid)
   if not target then return end
   if not begin_tooltip_any() then return end
 
-  reaper.ImGui_Text(ctx, tostring(target.name or "Track") .. " analysis evidence")
-  reaper.ImGui_Separator(ctx)
-  if target.metrics then
-    reaper.ImGui_TextDisabled(ctx, string.format(
-      "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
-      tonumber(target.metrics.avg_rms) or 0,
-      tonumber(target.metrics.mud_ratio) or 0,
-      tonumber(target.metrics.presence_ratio) or 0,
-      tonumber(target.metrics.brightness_ratio) or 0
-    ))
-  else
-    reaper.ImGui_TextDisabled(ctx, tostring(target.summary or "No metrics"))
-  end
+  -- Body in a pcall so end_tooltip_any() always runs. A throw here would leave
+  -- the tooltip window pushed on ImGui's stack, and the next EndChild would
+  -- then assert against the tooltip instead of the child column.
+  pcall(function()
+    safe_text(tostring(target.name or "Track") .. " analysis evidence")
+    safe_separator()
 
-  local rec_shown = 0
-  for _, rec in ipairs(target.recommendations or {}) do
-    if rec_shown >= 2 then break end
-    reaper.ImGui_TextDisabled(ctx, "- " .. tostring(rec))
-    rec_shown = rec_shown + 1
-  end
+    if target.metrics then
+      safe_text(string.format(
+        "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
+        tonumber(target.metrics.avg_rms) or 0,
+        tonumber(target.metrics.mud_ratio) or 0,
+        tonumber(target.metrics.presence_ratio) or 0,
+        tonumber(target.metrics.brightness_ratio) or 0
+      ), true)
+    else
+      safe_text(tostring(target.summary or "No metrics"), true)
+    end
+
+    local rec_shown = 0
+    for _, rec in ipairs(target.recommendations or {}) do
+      if rec_shown >= 2 then break end
+      safe_text("- " .. tostring(rec), true)
+      rec_shown = rec_shown + 1
+    end
+  end)
 
   end_tooltip_any()
 end
 
 local function safe_draw_child(label, width, height, draw_fn)
+  if not has_valid_ctx() then return end
+
   local started, opened = begin_child_any(label, width, height)
   if not started then
-    reaper.ImGui_Text(ctx, "Unable to render column")
+    safe_text("Unable to render column")
     return
   end
 
-  if opened then
-    local ok = pcall(draw_fn)
-    if not ok then
-      reaper.ImGui_Text(ctx, "Column render error")
-    end
+  -- EndChild ONLY when BeginChild actually opened the child.
+  --
+  -- Verified against ReaImGui 1.92.1 from mixguideeq_ui_debug.log: a child that
+  -- is culled -- which is what happens when you scroll a column out of view --
+  -- returns false without pushing a window, and EndChild then asserts with
+  --
+  --   ImGui_EndChild: Assertion failed: child_window->Flags & ImGuiWindowFlags_ChildWindow
+  --
+  -- taking the context down with it. Do not "fix" this back to an
+  -- unconditional EndChild on the strength of the upstream Dear ImGui docs;
+  -- this binding does not behave that way.
+  if not opened then
+    dbg("BeginChild '" .. tostring(label) .. "' culled; skipping EndChild")
+    return
   end
 
-  pcall(function()
+  local ok = pcall(draw_fn)
+  if not ok then
+    safe_text("Column render error")
+  end
+
+  dbg("EndChild '" .. tostring(label) .. "' (opened=true)")
+  local end_ok, end_err = pcall(function()
     reaper.ImGui_EndChild(ctx)
   end)
+  if not end_ok then
+    dbg("  EndChild THREW: " .. tostring(end_err))
+    dbg_flush("EndChild threw for '" .. tostring(label) .. "'")
+  end
 end
 
 local function refresh_suggestions()
@@ -344,7 +511,6 @@ local function refresh_suggestions()
   if fns and fns.build_suggestions then
     suggestion_data = fns.build_suggestions(strength_pct, volume_profile)
     suggestions_generated = true
-    active_results_tab = "suggestions"
     set_status("Suggestions generated")
   else
     suggestion_data = nil
@@ -360,7 +526,6 @@ local function refresh_frequency_report()
       analyze_in_progress = true
       analyze_progress_pct = 0
       suggestions_generated = false
-      active_results_tab = "analysis"
       set_status("Frequency analysis started")
     else
       freq_report = nil
@@ -376,6 +541,95 @@ local function refresh_frequency_report()
   end
 end
 
+local function refresh_pan_report()
+  if not (fns and fns.analyze_pan_report) then
+    pan_report = nil
+    set_status("Pan analysis unavailable")
+    return
+  end
+
+  local report = fns.analyze_pan_report(volume_profile)
+  if report then
+    pan_report = report
+    set_status("Pan analysis complete")
+  else
+    pan_report = nil
+    set_status("Pan analysis failed")
+  end
+end
+
+local function refresh_pan_snapshot_status()
+  if not (fns and fns.get_last_pan_apply_snapshot) then
+    pan_snapshot_status = ""
+    return
+  end
+
+  local snap = fns.get_last_pan_apply_snapshot()
+  if not snap or snap.available ~= true then
+    pan_snapshot_status = "Pan revert snapshot: none"
+    return
+  end
+
+  local time_text = ""
+  if snap.timestamp and tonumber(snap.timestamp) then
+    time_text = os.date("%H:%M:%S", tonumber(snap.timestamp))
+  end
+  pan_snapshot_status = string.format(
+    "Pan revert snapshot: %d track(s), %s profile, %s",
+    tonumber(snap.track_count) or 0,
+    tostring(snap.profile or "?"),
+    time_text
+  )
+end
+
+local function pan_position_text(pan)
+  local value = tonumber(pan)
+  if not value then return "-" end
+  if math.abs(value) < 0.02 then return "C" end
+  return string.format("%s%d", value < 0 and "L" or "R", math.floor(math.abs(value) * 100 + 0.5))
+end
+
+local function draw_pan_report()
+  if not pan_report then
+    safe_text("Run Analyze Pan to see the planned stereo placement.", true)
+    return
+  end
+
+  safe_text_wrapped(tostring(pan_report.summary or ""))
+  safe_spacing()
+
+  for _, row in ipairs(pan_report.rows or {}) do
+    local moves = {}
+    for _, track in ipairs(row.tracks or {}) do
+      if track.target_pan ~= nil then
+        moves[#moves + 1] = track
+      end
+    end
+    if #moves > 0 then
+      safe_text(title_role(row.role))
+      for _, track in ipairs(moves) do
+        local line = string.format("  %s: %s -> %s",
+          short_label(track.name, 28),
+          pan_position_text(track.current_pan),
+          pan_position_text(track.target_pan))
+        if track.is_stereo then
+          line = line .. "  [stereo: skipped]"
+        elseif track.already_set then
+          line = line .. "  [already panned]"
+        end
+        safe_text(line, true)
+        if is_last_item_hovered() and begin_tooltip_any() then
+          pcall(function()
+            safe_text(tostring(track.reason or ""))
+          end)
+          end_tooltip_any()
+        end
+      end
+      safe_spacing()
+    end
+  end
+end
+
 local function refresh_volume_report()
   if not (fns and fns.analyze_volume_report) then
     volume_report = nil
@@ -386,7 +640,6 @@ local function refresh_volume_report()
   local report = fns.analyze_volume_report(volume_profile)
   if report then
     volume_report = report
-    active_results_tab = "levels"
     set_status("Volume analysis complete")
   else
     volume_report = nil
@@ -417,6 +670,44 @@ local function refresh_level_snapshot_status()
     .. (time_text ~= "" and (", " .. time_text) or "")
 end
 
+-- One slice of the EQ apply per frame. Calibrating a filter and measuring the
+-- track either side of it is slow enough that doing every track in one call
+-- locked the window for seconds with nothing on screen.
+local EQ_APPLY_TRACKS_PER_FRAME = 1
+
+local function step_eq_apply_job()
+  if not eq_apply_in_progress then return end
+  if not (fns and fns.step_eq_apply) then
+    eq_apply_in_progress = false
+    return
+  end
+
+  local ok, result = fns.step_eq_apply(EQ_APPLY_TRACKS_PER_FRAME)
+  if not ok then
+    eq_apply_in_progress = false
+    return
+  end
+
+  eq_apply_progress_pct = math.max(0, math.min(100,
+    math.floor(((result.progress or 0) * 100) + 0.5)))
+
+  if result.done then
+    eq_apply_in_progress = false
+    eq_apply_progress_pct = 100
+    apply_report = result.summary or "Apply completed"
+    if result.errors and #result.errors > 0 then
+      apply_report = apply_report .. "\n" .. table.concat(result.errors, "\n")
+    end
+    -- The tracks no longer sound like what was measured.
+    suggestions_generated = false
+    suggestion_data = nil
+    freq_report = nil
+    volume_report = nil
+    set_status("Auto EQ applied")
+    operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+  end
+end
+
 local function step_frequency_analysis_job()
   if not analyze_in_progress then return end
   if not (fns and fns.step_frequency_analysis) then
@@ -440,43 +731,8 @@ local function step_frequency_analysis_job()
   end
 end
 
-local function draw_results_tabs()
-  if HAS_TABBAR_API and reaper.ImGui_BeginTabBar(ctx, "##results_tabs") then
-    if reaper.ImGui_BeginTabItem(ctx, "Analysis") then
-      active_results_tab = "analysis"
-      reaper.ImGui_EndTabItem(ctx)
-    end
-
-    local sugg_label = freq_report and "Suggestions" or "Suggestions (Analyze first)"
-    if reaper.ImGui_BeginTabItem(ctx, sugg_label) then
-      active_results_tab = "suggestions"
-      reaper.ImGui_EndTabItem(ctx)
-    end
-
-    if reaper.ImGui_BeginTabItem(ctx, "Levels") then
-      active_results_tab = "levels"
-      reaper.ImGui_EndTabItem(ctx)
-    end
-
-    reaper.ImGui_EndTabBar(ctx)
-    return
-  end
-
-  if reaper.ImGui_Button(ctx, "Analysis", 100, 0) then
-    active_results_tab = "analysis"
-  end
-  safe_same_line()
-  if reaper.ImGui_Button(ctx, "Suggestions", 110, 0) then
-    active_results_tab = "suggestions"
-  end
-  safe_same_line()
-  if reaper.ImGui_Button(ctx, "Levels", 90, 0) then
-    active_results_tab = "levels"
-  end
-end
-
 local function draw_profile_selector()
-  reaper.ImGui_TextDisabled(ctx, "Balance profile:")
+  safe_text("Balance profile:", true)
   safe_same_line()
   local profiles = get_volume_profiles()
   for i, profile in ipairs(profiles) do
@@ -494,8 +750,8 @@ end
 
 local function draw_track_column(role, items, width, height)
   safe_draw_child(role .. "##track_column", width, height, function()
-    reaper.ImGui_Text(ctx, title_role(role) .. "  (" .. tostring(#items) .. ")")
-    reaper.ImGui_Separator(ctx)
+    safe_text(title_role(role) .. "  (" .. tostring(#items) .. ")")
+    safe_separator()
 
     for _, item in ipairs(items) do
       local suffix = item.has_audio and "" or " [no audio]"
@@ -512,7 +768,7 @@ local function draw_track_column(role, items, width, height)
           volume_report = nil
         end
       else
-        reaper.ImGui_Text(ctx, item.display_name .. suffix)
+        safe_text(item.display_name .. suffix)
       end
     end
   end)
@@ -551,9 +807,9 @@ end
 local function draw_suggestion_column(role, width, height)
   safe_draw_child(role .. "##suggest_column", width, height, function()
     if not suggestions_generated or not suggestion_data then
-      reaper.ImGui_Text(ctx, title_role(role))
-      reaper.ImGui_Separator(ctx)
-      reaper.ImGui_TextDisabled(ctx, "Generate suggestions")
+      safe_text(title_role(role))
+      safe_separator()
+      safe_text("Generate suggestions", true)
       return
     end
 
@@ -566,33 +822,33 @@ local function draw_suggestion_column(role, width, height)
     end
 
     if not row_data then
-      reaper.ImGui_Text(ctx, title_role(role))
-      reaper.ImGui_Separator(ctx)
-      reaper.ImGui_TextDisabled(ctx, "No suggestion data")
+      safe_text(title_role(role))
+      safe_separator()
+      safe_text("No suggestion data", true)
       return
     end
 
     local profile_used = tostring(row_data.profile or suggestion_data.profile or "Even")
-    reaper.ImGui_Text(ctx, title_role(role) .. " (" .. profile_used .. ")")
-    reaper.ImGui_Separator(ctx)
+    safe_text(title_role(role) .. " (" .. profile_used .. ")")
+    safe_separator()
 
     if row_data.track_suggestions and #row_data.track_suggestions > 0 then
       for _, track_block in ipairs(row_data.track_suggestions) do
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_Separator(ctx)
-        reaper.ImGui_Text(ctx, tostring(track_block.name or "Track"))
+        safe_spacing()
+        safe_separator()
+        safe_text(tostring(track_block.name or "Track"))
         if is_last_item_hovered() then
           draw_analysis_tooltip_for_track(role, track_block.name, track_block.guid)
         end
         for i = 1, math.min(4, #(track_block.lines or {})) do
-          reaper.ImGui_TextDisabled(ctx, "- " .. tostring(track_block.lines[i]))
+          safe_text("- " .. tostring(track_block.lines[i]), true)
         end
       end
       return
     end
 
     for _, line in ipairs(row_data.lines or {}) do
-      reaper.ImGui_TextDisabled(ctx, "- " .. line)
+      safe_text("- " .. line, true)
     end
   end)
 end
@@ -616,18 +872,18 @@ end
 
 local function draw_frequency_report()
   if analyze_in_progress then
-    reaper.ImGui_Separator(ctx)
-    reaper.ImGui_Text(ctx, "Frequency Analysis")
-    reaper.ImGui_TextDisabled(ctx, "Analyzing... " .. tostring(analyze_progress_pct) .. "%")
+    safe_separator()
+    safe_text("Frequency Analysis")
+    safe_text("Analyzing... " .. tostring(analyze_progress_pct) .. "%", true)
     return
   end
 
   if not freq_report then return end
 
-  reaper.ImGui_Separator(ctx)
-  reaper.ImGui_Text(ctx, "Frequency Analysis Report (read-only)")
-  reaper.ImGui_TextWrapped(ctx, tostring(freq_report.summary or ""))
-  reaper.ImGui_Spacing(ctx)
+  safe_separator()
+  safe_text("Frequency Analysis Report (read-only)")
+  safe_text_wrapped(tostring(freq_report.summary or ""))
+  safe_spacing()
 
   local roles = get_roles()
   local row_by_role = {}
@@ -652,41 +908,39 @@ local function draw_frequency_report()
     }
 
     safe_draw_child(role .. "##freq_column", width, height, function()
-      reaper.ImGui_Text(ctx, title_role(role) .. " Analysis")
-      reaper.ImGui_Separator(ctx)
-      reaper.ImGui_TextDisabled(ctx,
-        "Analyzed " .. tostring(role_row.analyzed_track_count or 0)
+      safe_text(title_role(role) .. " Analysis")
+      safe_separator()
+      safe_text("Analyzed " .. tostring(role_row.analyzed_track_count or 0)
         .. " | Excluded " .. tostring(role_row.excluded_track_count or 0)
-        .. " | Skipped " .. tostring(role_row.skipped_track_count or 0)
-      )
+        .. " | Skipped " .. tostring(role_row.skipped_track_count or 0), true)
 
       if not role_row.tracks or #role_row.tracks == 0 then
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_TextDisabled(ctx, "No analyzed tracks in this role")
+        safe_spacing()
+        safe_text("No analyzed tracks in this role", true)
         return
       end
 
       for _, t in ipairs(role_row.tracks) do
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_Separator(ctx)
-        reaper.ImGui_Text(ctx, tostring(t.name or "Track"))
+        safe_spacing()
+        safe_separator()
+        safe_text(tostring(t.name or "Track"))
 
         if t.metrics then
-          reaper.ImGui_TextDisabled(ctx, string.format(
+          safe_text(string.format(
             "RMS %.4f | Mud %.2f | Presence %.2f | Brightness %.2f",
             tonumber(t.metrics.avg_rms) or 0,
             tonumber(t.metrics.mud_ratio) or 0,
             tonumber(t.metrics.presence_ratio) or 0,
             tonumber(t.metrics.brightness_ratio) or 0
-          ))
+          ), true)
         else
-          reaper.ImGui_TextDisabled(ctx, tostring(t.summary or "No metrics"))
+          safe_text(tostring(t.summary or "No metrics"), true)
         end
 
         local rec_shown = 0
         for _, rec in ipairs(t.recommendations or {}) do
           if rec_shown >= 2 then break end
-          reaper.ImGui_TextDisabled(ctx, "- " .. tostring(rec))
+          safe_text("- " .. tostring(rec), true)
           rec_shown = rec_shown + 1
         end
       end
@@ -700,137 +954,61 @@ end
 
 local function draw_volume_report()
   if not volume_report then
-    reaper.ImGui_TextDisabled(ctx, "Run Analyze Levels to generate a report.")
+    safe_text("Run Analyze Levels to measure every track and rank them.", true)
     return
   end
 
-  reaper.ImGui_Separator(ctx)
-  reaper.ImGui_Text(ctx, "Volume Analysis Report (profile: " .. tostring(volume_report.profile or volume_profile) .. ")")
-  reaper.ImGui_TextWrapped(ctx, tostring(volume_report.summary or ""))
-  if volume_report.profile_description and volume_report.profile_description ~= "" then
-    reaper.ImGui_TextDisabled(ctx, tostring(volume_report.profile_description))
-  end
-  reaper.ImGui_TextDisabled(ctx, "Reference loudness anchor: " .. fmt_db(volume_report.reference_db))
-  reaper.ImGui_Spacing(ctx)
+  safe_separator()
+  safe_text("Levels (profile: " .. tostring(volume_report.profile or volume_profile) .. ")")
+  safe_text_wrapped(tostring(volume_report.summary or ""))
+  safe_text("Averages exclude silence (gated). Stereo measured as mono. "
+    .. "Values are relative to the loudest track.", true)
+  safe_spacing()
 
-  local roles = get_roles()
-  local row_by_role = {}
-  for _, role_row in ipairs(volume_report.rows or {}) do
-    row_by_role[role_row.role] = role_row
-  end
+  safe_text(string.format("  %-24s %8s %8s %7s  %s",
+    "TRACK", "avg", "max", "move", "rank"), true)
+  safe_separator()
 
-  local avail_x, avail_y = reaper.ImGui_GetContentRegionAvail(ctx)
-  local spacing = 8
-  local total_spacing = spacing * (#roles - 1)
-  local width = (avail_x - total_spacing) / #roles
-  if width < 200 then width = 200 end
-  local height = math.max(260, math.min(440, math.floor(avail_y * 0.58)))
-
-  for idx, role in ipairs(roles) do
-    local role_row = row_by_role[role] or {
-      role = role,
-      analyzed_track_count = 0,
-      excluded_track_count = 0,
-      skipped_track_count = 0,
-      groups = {},
-    }
-
-    safe_draw_child(role .. "##level_column", width, height, function()
-      reaper.ImGui_Text(ctx, title_role(role) .. " Levels")
-      reaper.ImGui_Separator(ctx)
-      reaper.ImGui_TextDisabled(ctx,
-        "Analyzed " .. tostring(role_row.analyzed_track_count or 0)
-        .. " | Excluded " .. tostring(role_row.excluded_track_count or 0)
-        .. " | Skipped " .. tostring(role_row.skipped_track_count or 0)
-      )
-      reaper.ImGui_TextDisabled(ctx, tostring(role_row.profile_note or ""))
-      reaper.ImGui_TextDisabled(ctx, "Role target: " .. fmt_db(role_row.target_role_db))
-
-      if not role_row.groups or #role_row.groups == 0 then
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_TextDisabled(ctx, "No analyzed groups")
-        return
-      end
-
-      local top_boost = nil
-      local top_cut = nil
-      local top_root = nil
-      for _, g in ipairs(role_row.groups or {}) do
-        local root_delta = tonumber(g.group_delta_db) or 0
-        if not top_root or math.abs(root_delta) > math.abs(top_root.delta) then
-          top_root = { name = tostring(g.root_name or "Root"), delta = root_delta }
-        end
-
-        for _, t in ipairs(g.entries or {}) do
-          local d = tonumber(t.final_preview_delta_db) or 0
-          if d > 0 and (not top_boost or d > top_boost.delta) then
-            top_boost = { name = tostring(t.name or "Track"), delta = d }
-          end
-          if d < 0 and (not top_cut or d < top_cut.delta) then
-            top_cut = { name = tostring(t.name or "Track"), delta = d }
-          end
-        end
-      end
-
-      reaper.ImGui_TextDisabled(ctx,
-        "Volume Adjustment Preview"
-      )
-      reaper.ImGui_TextDisabled(ctx,
-        "+ " .. (top_boost and (top_boost.name .. " " .. fmt_db(top_boost.delta)) or "No significant boosts")
-      )
-      reaper.ImGui_TextDisabled(ctx,
-        "- " .. (top_cut and (top_cut.name .. " " .. fmt_db(top_cut.delta)) or "No significant cuts")
-      )
-      reaper.ImGui_TextDisabled(ctx,
-        "Root " .. (top_root and (top_root.name .. " " .. fmt_db(top_root.delta)) or "moves: none")
-      )
-
-      for _, g in ipairs(role_row.groups) do
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_Separator(ctx)
-        reaper.ImGui_Text(ctx, tostring(g.root_name or "Root"))
-        reaper.ImGui_TextWrapped(ctx,
-          "Root " .. fmt_db(g.group_delta_db) .. " | " .. fmt_db(g.current_db) .. " -> " .. fmt_db(g.target_db)
-        )
-        if g.can_apply_root == false then
-          reaper.ImGui_TextDisabled(ctx, "Root excluded: global root shift will be skipped on apply")
-        end
-
-        for i = 1, math.min(6, #(g.entries or {})) do
-          local t = g.entries[i]
-          local track_name = short_label(t.name, 24)
-          local compact = string.format(
-            "- %s | p %.2f | rel %s | ch %s | fin %s",
-            track_name,
-            tonumber(t.pan) or 0,
-            fmt_db(t.pan_relief_db),
-            fmt_db(t.child_delta_db),
-            fmt_db(t.final_preview_delta_db)
-          )
-          reaper.ImGui_TextWrapped(ctx, compact)
-        end
-
-        if (g.entries and #g.entries or 0) > 6 then
-          reaper.ImGui_TextDisabled(ctx, "..." .. tostring(#g.entries - 6) .. " more track(s)")
-        end
-      end
-    end)
-
-    if idx < #roles then
-      safe_same_line()
+  for _, row in ipairs(volume_report.ranked or {}) do
+    local move = tonumber(row.delta_db) or 0
+    local rank_note = ""
+    local target_rank = tonumber(row.target_rank)
+    if target_rank and target_rank ~= row.rank then
+      -- Which way it needs to travel in the ranking, which is the thing the
+      -- list is for.
+      local direction = (target_rank < row.rank) and "up" or "down"
+      rank_note = string.format("%d -> %d (%s)", row.rank, target_rank, direction)
+    else
+      rank_note = string.format("%d", row.rank or 0)
     end
+
+    local line = string.format("  %-24s %8s %8s %7s  %s",
+      short_label(row.name, 24),
+      fmt_db(row.rel_avg_db),
+      fmt_db(row.rel_max_db),
+      (move == 0) and "-" or fmt_db(move),
+      rank_note)
+    safe_text_wrapped(line)
+  end
+
+  if (volume_report.excluded_track_count or 0) > 0
+    or (volume_report.skipped_track_count or 0) > 0 then
+    safe_spacing()
+    safe_text(string.format("Excluded %d, skipped %d (no audio or below the gate).",
+      volume_report.excluded_track_count or 0,
+      volume_report.skipped_track_count or 0), true)
   end
 end
 
 local function draw_move_controls(columns)
   if not selected_track_guid then
-    reaper.ImGui_TextDisabled(ctx, "Select a track in any column to move it.")
+    safe_text("Select a track in any column to move it.", true)
     return
   end
 
   local selected_item = find_selected_item(columns)
 
-  reaper.ImGui_Text(ctx, "Move selected track to:")
+  safe_text("Move selected track to:")
   local roles = get_roles()
   for _, role in ipairs(roles) do
     if role ~= selected_track_role then
@@ -866,47 +1044,71 @@ local function draw_move_controls(columns)
   if selected_item then
     safe_same_line()
     if is_excluded then
-      reaper.ImGui_TextDisabled(ctx, "This track is excluded from suggestions and apply")
+      safe_text("This track is excluded from suggestions and apply", true)
     else
-      reaper.ImGui_TextDisabled(ctx, "This track is included in suggestions and apply")
+      safe_text("This track is included in suggestions and apply", true)
     end
   end
 end
 
-local function draw_bottom_row_controls()
-  if not HAS_SETCURSOR_API then
-    if reaper.ImGui_Button(ctx, "Save Project Map", 140, 0) then
-      local ok, info = fns and fns.save_project_roles and fns.save_project_roles()
-      if ok then set_status("Project map saved") else set_status(info or "Could not save project map") end
-    end
-    safe_same_line()
-    if reaper.ImGui_Button(ctx, "Reload Project Map", 145, 0) then
-      local ok = fns and fns.load_project_roles and fns.load_project_roles()
-      if ok then
-        suggestions_generated = false
-        set_status("Project map reloaded")
-      else
-        set_status("No saved project map found")
-      end
-    end
+-- Height reserved at the bottom of the window for the always-visible footer.
+local FOOTER_HEIGHT = 62
 
-    safe_same_line()
-    if reaper.ImGui_Button(ctx, "Install/Update", 120, 0) then
-      if HAS_POPUP_MODAL_API then
-        request_open_update_popup = true
-      else
-        show_update_panel_inline = not show_update_panel_inline
-      end
-    end
-    return
+-- Jump the edit cursor to a bar and start playback, so a change can be heard
+-- without leaving the panel.
+local function remember_preview_measure()
+  if fns and fns.set_preview_measure then
+    fns.set_preview_measure(preview_measure_buf)
+  end
+end
+
+local function draw_preview_controls()
+  -- Follow the project: the bar number is stored per project, so a tab switch
+  -- reloads it underneath us.
+  local stored = md_ref and md_ref.preview_measure
+  if stored ~= nil and stored ~= preview_measure_last_seen then
+    preview_measure_buf = tostring(stored)
+    preview_measure_last_seen = preview_measure_buf
   end
 
-  local cur_y = reaper.ImGui_GetCursorPosY(ctx)
-  local _, avail_y = reaper.ImGui_GetContentRegionAvail(ctx)
-  local y = cur_y + math.max(0, avail_y - 24)
+  safe_text("Preview from bar", true)
+  safe_same_line()
+  reaper.ImGui_PushItemWidth(ctx, 60)
+  local changed, value = reaper.ImGui_InputText(ctx, "##preview_measure", preview_measure_buf)
+  reaper.ImGui_PopItemWidth(ctx)
+  if changed then
+    preview_measure_buf = value
+    preview_measure_last_seen = value
+    if md_ref then md_ref.preview_measure = value end
+  end
+  -- Save on the way out of the box rather than per keystroke.
+  if reaper.APIExists("ImGui_IsItemDeactivatedAfterEdit")
+    and reaper.ImGui_IsItemDeactivatedAfterEdit(ctx) then
+    queue_action(remember_preview_measure)
+  end
 
-  reaper.ImGui_SetCursorPosX(ctx, 8)
-  reaper.ImGui_SetCursorPosY(ctx, y)
+  safe_same_line()
+  if reaper.ImGui_Button(ctx, "Play", 60, 0) then
+    queue_action(function()
+      remember_preview_measure()
+      if fns and fns.preview_from_measure then
+        local ok, info = fns.preview_from_measure(preview_measure_buf)
+        set_status(ok and ("Playing from bar " .. tostring(info))
+          or tostring(info or "Could not start playback"))
+      end
+    end)
+  end
+
+  safe_same_line()
+  if reaper.ImGui_Button(ctx, "Stop", 60, 0) then
+    queue_action(function()
+      if fns and fns.stop_preview then fns.stop_preview() end
+    end)
+  end
+end
+
+local function draw_footer()
+  safe_separator()
 
   if reaper.ImGui_Button(ctx, "Save Project Map", 140, 0) then
     local ok, info = fns and fns.save_project_roles and fns.save_project_roles()
@@ -923,12 +1125,11 @@ local function draw_bottom_row_controls()
       set_status("No saved project map found")
     end
   end
-  local avail_x, _ = reaper.ImGui_GetContentRegionAvail(ctx)
-  local left_width = 140 + 145 + 8
-  local x = math.max(8 + left_width + 16, 8 + math.max(0, avail_x - 120))
-  reaper.ImGui_SetCursorPosX(ctx, x)
-  reaper.ImGui_SetCursorPosY(ctx, y)
 
+  safe_same_line()
+  draw_preview_controls()
+
+  safe_same_line()
   if reaper.ImGui_Button(ctx, "Install/Update", 120, 0) then
     if HAS_POPUP_MODAL_API then
       request_open_update_popup = true
@@ -936,15 +1137,30 @@ local function draw_bottom_row_controls()
       show_update_panel_inline = not show_update_panel_inline
     end
   end
+
+  -- Status line. Always present so the row does not jump about as messages
+  -- come and go.
+  local line = ""
+  if status_msg ~= "" and reaper.time_precise() < status_expiry then
+    line = status_msg
+  elseif operation_done_msg ~= "" then
+    line = operation_done_msg
+  end
+  if line == "" then
+    safe_text("Ready", true)
+  else
+    safe_text(line)
+  end
 end
+
 
 local function draw_update_popup()
   if not HAS_POPUP_MODAL_API then
     if not show_update_panel_inline then return end
 
-    reaper.ImGui_Separator(ctx)
-    reaper.ImGui_Text(ctx, "Install/Update")
-    reaper.ImGui_Text(ctx, "Installer source folder")
+    safe_separator()
+    safe_text("Install/Update")
+    safe_text("Installer source folder")
     local src_changed, src_value = reaper.ImGui_InputText(ctx, "##install_source_inline", install_source_buf)
     if src_changed then install_source_buf = src_value end
 
@@ -989,7 +1205,11 @@ local function draw_update_popup()
   local visible = reaper.ImGui_BeginPopupModal(ctx, "Install/Update##popup", true)
   if not visible then return end
 
-  reaper.ImGui_Text(ctx, "Installer source folder")
+  -- Body in a pcall so EndPopup always runs. A leaked popup window desyncs
+  -- ImGui's stack exactly like a leaked tooltip does.
+  local popup_ok, popup_err = pcall(function()
+
+  safe_text("Installer source folder")
   local source_changed, source_value = reaper.ImGui_InputText(ctx, "##install_source", install_source_buf)
   if source_changed then install_source_buf = source_value end
 
@@ -1024,6 +1244,11 @@ local function draw_update_popup()
     reaper.ImGui_CloseCurrentPopup(ctx)
   end
 
+  end)
+  if not popup_ok then
+    set_status("Update panel error: " .. tostring(popup_err))
+  end
+
   reaper.ImGui_EndPopup(ctx)
 end
 
@@ -1031,14 +1256,375 @@ function M.init(md, functions)
   md_ref = md
   fns = functions
   install_source_buf = (md_ref and md_ref.install_source_dir) or ""
+  preview_measure_buf = tostring((md_ref and md_ref.preview_measure) or "1")
+  preview_measure_last_seen = preview_measure_buf
   ctx = reaper.ImGui_CreateContext("MixGuideEQ")
+  dbg("init: context created, USES_CHILD_FLAGS=" .. tostring(USES_CHILD_FLAGS))
 end
 
-function M.loop()
-  if not has_valid_ctx() then return false end
+-- One ImGui frame.
+--
+-- Runs inside a pcall in M.loop below. Reaper can invalidate the context
+-- part-way through a frame: an apply calls TrackList_AdjustWindows and
+-- UpdateArrange, which pump Reaper's own UI, and every ImGui call after that
+-- throws. ImGui_ValidatePtr does not reliably detect it -- it reported the
+-- context as valid while ImGui_Spacing was rejecting the same pointer -- so
+-- the frame is protected as a whole rather than call by call.
+-- ── stages ──────────────────────────────────────────────────────────────────
+--
+-- The window is one stage at a time, in the order the work actually happens:
+-- map the tracks, shape them, place them, then set levels.
+--
+-- EQ comes before Balance on purpose. EQ decisions here are level-independent
+-- (band shares are normalised by total energy), but EQ *changes* level -- so
+-- EQ-then-levels settles in one pass, where levels-then-EQ always needs a
+-- re-balance afterwards. Pan sits between them because placement shifts
+-- perceived level too, which leaves Balance to settle everything last.
+--
+-- Going back and re-applying EQ marks Balance "redo" rather than adding a fifth
+-- stage, so the loop back is visible without pretending it is a new step.
 
-  step_frequency_analysis_job()
+local STAGE_ORDER = { "map", "eq", "pan", "balance" }
+local STAGE_TITLES = {
+  map = "1 Map", eq = "2 EQ", pan = "3 Pan", balance = "4 Balance",
+}
+local STAGE_BLURB = {
+  map     = "Put each track in a role column and exclude anything that is not musical material.",
+  eq      = "Measure each track and shape it towards the profile's targets. Done first because EQ changes level.",
+  pan     = "Place tracks across the stereo image. Pairs go opposite each other.",
+  balance = "Set how loud each track sits. Last, so it settles what EQ and pan have changed.",
+}
+local active_stage = "map"
 
+local function snapshot_available(getter)
+  if not getter then return false end
+  local ok, snap = pcall(getter)
+  return ok and snap ~= nil and snap.available == true
+end
+
+local function compute_stage_status(columns)
+  local track_count = 0
+  for _, role in ipairs(get_roles()) do
+    track_count = track_count + #(columns[role] or {})
+  end
+
+  local levels_applied = snapshot_available(fns and fns.get_last_volume_apply_snapshot)
+  local pans_applied = snapshot_available(fns and fns.get_last_pan_apply_snapshot)
+  local eq_stale = md_ref and md_ref.eq_applied_since_balance == true
+
+  local status = { track_count = track_count }
+
+  status.map = track_count > 0
+    and { state = "done", note = tostring(track_count) .. " track(s) mapped" }
+    or { state = "now", note = "no tracks found in this project" }
+
+  if track_count == 0 then
+    status.balance = { state = "locked", note = "map tracks first" }
+    status.pan = { state = "locked", note = "map tracks first" }
+    status.eq = { state = "locked", note = "map tracks first" }
+    return status
+  end
+
+  if eq_stale then
+    status.balance = { state = "redo", note = "EQ changed levels - balance again" }
+  elseif levels_applied then
+    status.balance = { state = "done", note = "levels applied, revert available" }
+  else
+    status.balance = { state = "now", note = "not balanced yet" }
+  end
+
+  if pans_applied then
+    status.pan = { state = "done", note = "pans applied, revert available" }
+  else
+    status.pan = { state = "now", note = "not placed yet" }
+  end
+
+  if suggestions_generated then
+    status.eq = { state = "now", note = "review the cards, then apply" }
+  elseif freq_report then
+    status.eq = { state = "now", note = "analysed, generate suggestions" }
+  else
+    status.eq = { state = "now", note = "not analysed yet" }
+  end
+
+  return status
+end
+
+local function stage_next_hint(status)
+  if active_stage == "map" then
+    return "Next: 2 EQ"
+  elseif active_stage == "eq" then
+    if md_ref and md_ref.eq_applied_since_balance == true then
+      return "Next: 3 Pan"
+    end
+    return "Analyze Frequency, Generate Suggestions, then Apply Auto EQ."
+  elseif active_stage == "pan" then
+    if status.pan.state == "done" then return "Next: 4 Balance" end
+    return "Run Analyze Pan, review, then Apply."
+  end
+  if status.balance.state == "redo" then
+    return "EQ was applied after the last balance - run Analyze Levels again."
+  end
+  if status.balance.state == "done" then
+    return "Done. Listen, and use Preview to jump around."
+  end
+  return "Run Analyze Levels, review the ranking, then Apply."
+end
+
+local function draw_stage_strip(status)
+  for i, stage in ipairs(STAGE_ORDER) do
+    local st = status[stage] or { state = "now", note = "" }
+    local marker = (active_stage == stage) and "> " or "  "
+    local label = marker .. STAGE_TITLES[stage] .. "  [" .. st.state .. "]"
+    if reaper.ImGui_Button(ctx, label .. "##stage_" .. stage, 165, 0) then
+      active_stage = stage
+    end
+    if is_last_item_hovered() and begin_tooltip_any() then
+      pcall(function()
+        safe_text(STAGE_TITLES[stage])
+        safe_text(STAGE_BLURB[stage] or "", true)
+        safe_text(st.note or "", true)
+      end)
+      end_tooltip_any()
+    end
+    if i < #STAGE_ORDER then
+      safe_same_line()
+    end
+  end
+end
+
+local function draw_profile_header()
+  safe_text("Profile", true)
+  safe_same_line()
+  draw_profile_selector()
+end
+
+-- ── stage bodies ────────────────────────────────────────────────────────────
+
+local function draw_stage_map(columns)
+  safe_text_wrapped(STAGE_BLURB.map)
+  safe_spacing()
+  draw_track_columns(columns)
+  safe_spacing()
+  draw_move_controls(columns)
+end
+
+local function draw_stage_balance()
+  safe_text_wrapped(STAGE_BLURB.balance)
+  safe_spacing()
+
+  if reaper.ImGui_Button(ctx, "Analyze Levels", 140, 0) then
+    -- Take the previous apply off first: measuring the panel's own output would
+    -- compute the next plan against the wrong starting point.
+    queue_action(function()
+      if fns.revert_before_analysis then
+        fns.revert_before_analysis("levels")
+      end
+      refresh_volume_report()
+      refresh_level_snapshot_status()
+    end)
+  end
+  safe_same_line()
+  if volume_report and reaper.ImGui_Button(ctx, "Apply Level Balance", 170, 0) then
+    queue_action(function()
+      local ok, summary, errors, refreshed = fns.apply_volume_balance(volume_profile)
+      level_apply_report = summary or "Level balance applied"
+      if errors and #errors > 0 then
+        level_apply_report = level_apply_report .. "\n" .. table.concat(errors, "\n")
+      end
+      volume_report = refreshed or volume_report
+      if ok then
+        set_status("Level balance applied")
+        operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+        refresh_level_snapshot_status()
+      else
+        set_status(summary or "Level balance failed")
+      end
+    end)
+  end
+
+  if snapshot_available(fns and fns.get_last_volume_apply_snapshot) then
+    safe_same_line()
+    if reaper.ImGui_Button(ctx, "Revert Last Level Apply", 190, 0) then
+      queue_action(function()
+        local ok, summary, errors = fns.revert_last_volume_balance()
+        level_apply_report = summary or "Revert attempted"
+        if errors and #errors > 0 then
+          level_apply_report = level_apply_report .. "\n" .. table.concat(errors, "\n")
+        end
+        if ok then
+          set_status("Last level apply reverted")
+          operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+          refresh_level_snapshot_status()
+          refresh_volume_report()
+        else
+          set_status(summary or "Revert failed")
+        end
+      end)
+    end
+  end
+
+  if level_snapshot_status == "" then
+    refresh_level_snapshot_status()
+  end
+  safe_spacing()
+  safe_text(level_snapshot_status, true)
+  safe_spacing()
+  draw_volume_report()
+  safe_spacing()
+  safe_text_wrapped(level_apply_report)
+end
+
+local function draw_stage_pan()
+  safe_text_wrapped(STAGE_BLURB.pan)
+  safe_spacing()
+
+  if reaper.ImGui_Button(ctx, "Analyze Pan", 140, 0) then
+    queue_action(function()
+      if fns.revert_before_analysis then
+        fns.revert_before_analysis("pans")
+      end
+      refresh_pan_report()
+      refresh_pan_snapshot_status()
+    end)
+  end
+  safe_same_line()
+  if pan_report and reaper.ImGui_Button(ctx, "Apply Pan Placement", 180, 0) then
+    queue_action(function()
+      local ok, summary, errors, refreshed = fns.apply_pan_balance(volume_profile, pan_override_existing)
+      pan_apply_report = summary or "Pan placement applied"
+      if errors and #errors > 0 then
+        pan_apply_report = pan_apply_report .. "\n" .. table.concat(errors, "\n")
+      end
+      pan_report = refreshed or pan_report
+      if ok then
+        set_status("Pan placement applied")
+        operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+        refresh_pan_snapshot_status()
+      else
+        set_status(summary or "Pan placement failed")
+      end
+    end)
+  end
+
+  if snapshot_available(fns and fns.get_last_pan_apply_snapshot) then
+    safe_same_line()
+    if reaper.ImGui_Button(ctx, "Revert Last Pan Apply", 190, 0) then
+      queue_action(function()
+        local ok, summary, errors = fns.revert_last_pan_balance()
+        pan_apply_report = summary or "Revert attempted"
+        if errors and #errors > 0 then
+          pan_apply_report = pan_apply_report .. "\n" .. table.concat(errors, "\n")
+        end
+        if ok then
+          set_status("Last pan apply reverted")
+          operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
+          refresh_pan_snapshot_status()
+          refresh_pan_report()
+        else
+          set_status(summary or "Revert failed")
+        end
+      end)
+    end
+  end
+
+  local changed, value = reaper.ImGui_Checkbox(ctx, "Override existing pans", pan_override_existing)
+  if changed then
+    pan_override_existing = value
+  end
+  if is_last_item_hovered() and begin_tooltip_any() then
+    pcall(function()
+      safe_text("Off: tracks you have already panned keep their position.")
+      safe_text("On: every track is placed by the profile's rules.")
+      safe_text("Revert Last Pan Apply restores the originals either way.", true)
+    end)
+    end_tooltip_any()
+  end
+
+  if pan_snapshot_status == "" then
+    refresh_pan_snapshot_status()
+  end
+  safe_spacing()
+  safe_text(pan_snapshot_status, true)
+  safe_spacing()
+  draw_pan_report()
+  safe_spacing()
+  safe_text_wrapped(pan_apply_report)
+end
+
+local function draw_stage_eq()
+  safe_text_wrapped(STAGE_BLURB.eq)
+  safe_spacing()
+
+  local changed_strength, new_strength =
+    reaper.ImGui_SliderInt(ctx, "Suggestion Strength %", strength_pct, 0, 150)
+  if changed_strength then
+    strength_pct = new_strength
+    freq_report = nil
+    analyze_in_progress = false
+    analyze_progress_pct = 0
+    suggestions_generated = false
+  end
+
+  safe_spacing()
+  if analyze_in_progress then
+    safe_text("Analyzing... " .. tostring(analyze_progress_pct) .. "%", true)
+  elseif reaper.ImGui_Button(ctx, "Analyze Frequency", 150, 0) then
+    -- Take every later stage off first, and this stage's own makeup gain with
+    -- it: measuring a mix the panel has already moved computes the next plan
+    -- against the wrong starting point. Queued, because reverting pumps
+    -- Reaper's UI and that invalidates the ImGui context mid-frame.
+    queue_action(function()
+      if fns and fns.revert_before_analysis then
+        fns.revert_before_analysis("eq")
+      end
+      refresh_frequency_report()
+    end)
+  end
+
+  if not analyze_in_progress and freq_report then
+    safe_same_line()
+    if reaper.ImGui_Button(ctx, "Generate Suggestions", 160, 0) then
+      refresh_suggestions()
+    end
+  end
+
+  if eq_apply_in_progress then
+    safe_same_line()
+    safe_text("Applying... " .. tostring(eq_apply_progress_pct) .. "%", true)
+  elseif suggestions_generated and suggestion_data then
+    safe_same_line()
+    if reaper.ImGui_Button(ctx, "Apply Auto EQ", 140, 0) then
+      queue_action(function()
+        local ok, info = fns.start_eq_apply(strength_pct, volume_profile)
+        if ok then
+          eq_apply_in_progress = true
+          eq_apply_progress_pct = 0
+          apply_report = "Applying EQ to " .. tostring(info.queued) .. " track(s)..."
+          set_status("Applying Auto EQ")
+        else
+          set_status(tostring(info or "Apply failed"))
+          apply_report = tostring(info or "Apply failed")
+        end
+      end)
+    end
+  end
+
+  safe_spacing()
+  if suggestions_generated and suggestion_data then
+    safe_text("Audio tracks analysed: " .. tostring(suggestion_data.total_audio_tracks or 0), true)
+    safe_spacing()
+    draw_suggestion_columns()
+  else
+    draw_frequency_report()
+  end
+
+  safe_spacing()
+  safe_text_wrapped(apply_report)
+end
+
+
+local function draw_frame()
   if reaper.ImGui_SetNextWindowSize then
     local cond = reaper.ImGui_Cond_FirstUseEver and reaper.ImGui_Cond_FirstUseEver() or 0
     reaper.ImGui_SetNextWindowSize(ctx, 1600, 920, cond)
@@ -1048,159 +1634,46 @@ function M.loop()
   local visible, open = reaper.ImGui_Begin(ctx, title, true)
 
   if visible then
-    reaper.ImGui_TextWrapped(ctx, "Single-panel workflow: map tracks, generate suggestions, then apply.")
-    reaper.ImGui_Separator(ctx)
-
-    local changed_strength, new_strength = reaper.ImGui_SliderInt(ctx, "Suggestion Strength %", strength_pct, 0, 150)
-    if changed_strength then
-      strength_pct = new_strength
-      freq_report = nil
-      analyze_in_progress = false
-      analyze_progress_pct = 0
-      suggestions_generated = false
-      active_results_tab = "analysis"
-    end
-
-    reaper.ImGui_TextDisabled(ctx, "Use Results tabs below: Analyze first, then Suggestions.")
-
-    reaper.ImGui_Spacing(ctx)
+    -- Everything above the footer scrolls inside this region, so the footer
+    -- below it stays pinned to the bottom of the window.
+    local _, body_avail = reaper.ImGui_GetContentRegionAvail(ctx)
+    local body_height = math.max(120, body_avail - FOOTER_HEIGHT)
+    local body_started, body_opened = begin_child_any("##body", 0, body_height)
+    local body_drawn = body_started and body_opened
     local columns = load_columns()
-    draw_track_columns(columns)
+    local stage_status = compute_stage_status(columns)
 
-    reaper.ImGui_Spacing(ctx)
-    draw_move_controls(columns)
+    draw_profile_header()
+    safe_spacing()
+    draw_stage_strip(stage_status)
+    safe_separator()
+    safe_text(stage_next_hint(stage_status), true)
+    safe_spacing()
 
-    reaper.ImGui_Separator(ctx)
-    reaper.ImGui_TextWrapped(ctx, "Results")
-    draw_results_tabs()
-    draw_profile_selector()
-    reaper.ImGui_Spacing(ctx)
-
-    if active_results_tab == "analysis" then
-      if analyze_in_progress then
-        reaper.ImGui_TextDisabled(ctx, "Analyze in progress...")
-      elseif reaper.ImGui_Button(ctx, "Analyze Frequency", 150, 0) then
-        refresh_frequency_report()
-      end
-      reaper.ImGui_Spacing(ctx)
-      draw_frequency_report()
+    if active_stage == "map" then
+      draw_stage_map(columns)
+    elseif active_stage == "balance" then
+      draw_stage_balance()
+    elseif active_stage == "pan" then
+      draw_stage_pan()
     else
-      if active_results_tab == "suggestions" and analyze_in_progress then
-        reaper.ImGui_TextDisabled(ctx, "Wait for analysis to complete before generating suggestions.")
-      elseif active_results_tab == "suggestions" and freq_report then
-        if reaper.ImGui_Button(ctx, "Generate Suggestions", 160, 0) then
-          refresh_suggestions()
-        end
-      elseif active_results_tab == "suggestions" then
-        reaper.ImGui_TextDisabled(ctx, "Analyze Frequency first to enable suggestions.")
-      end
-
-      if active_results_tab == "suggestions" then
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_TextWrapped(ctx, "Suggestions by role (displayed below matching columns).")
-        reaper.ImGui_TextDisabled(ctx, "Profile emphasis: " .. tostring(volume_profile))
-        reaper.ImGui_Spacing(ctx)
-        draw_suggestion_columns()
-      else
-        if reaper.ImGui_Button(ctx, "Analyze Levels", 140, 0) then
-          refresh_volume_report()
-          refresh_level_snapshot_status()
-        end
-        safe_same_line()
-        if volume_report and reaper.ImGui_Button(ctx, "Apply Level Balance", 170, 0) then
-          if fns and fns.apply_volume_balance then
-            local ok, summary, errors, refreshed_report = fns.apply_volume_balance(volume_profile)
-            level_apply_report = summary or "Level balance applied"
-            if errors and #errors > 0 then
-              level_apply_report = level_apply_report .. "\n" .. table.concat(errors, "\n")
-            end
-            if refreshed_report then
-              volume_report = refreshed_report
-            else
-              refresh_volume_report()
-            end
-            if ok then
-              set_status("Level balance applied")
-              operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
-              refresh_level_snapshot_status()
-            else
-              set_status(summary or "Level balance failed")
-              operation_done_msg = "Operation finished with issues: " .. os.date("%H:%M:%S")
-            end
-          end
-        end
-        safe_same_line()
-        if reaper.ImGui_Button(ctx, "Revert Last Level Apply", 190, 0) then
-          if fns and fns.revert_last_volume_balance then
-            local ok, summary, errors = fns.revert_last_volume_balance()
-            level_apply_report = summary or "Revert attempted"
-            if errors and #errors > 0 then
-              level_apply_report = level_apply_report .. "\n" .. table.concat(errors, "\n")
-            end
-            if ok then
-              set_status("Last level apply reverted")
-              operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
-              refresh_level_snapshot_status()
-              refresh_volume_report()
-            else
-              set_status(summary or "Revert failed")
-              operation_done_msg = "Operation finished with issues: " .. os.date("%H:%M:%S")
-            end
-          end
-        end
-        if level_snapshot_status == "" then
-          refresh_level_snapshot_status()
-        end
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_TextDisabled(ctx, level_snapshot_status)
-        reaper.ImGui_Spacing(ctx)
-        draw_volume_report()
-        reaper.ImGui_Spacing(ctx)
-        reaper.ImGui_TextWrapped(ctx, level_apply_report)
-      end
-    end
-
-    if suggestions_generated and suggestion_data then
-      reaper.ImGui_Spacing(ctx)
-      reaper.ImGui_Text(ctx, "Audio tracks used for suggestions: " .. tostring(suggestion_data.total_audio_tracks or 0))
-      reaper.ImGui_TextWrapped(ctx, apply_report)
-      reaper.ImGui_Spacing(ctx)
-      if reaper.ImGui_Button(ctx, "Apply Auto EQ", 140, 0) then
-        if fns and fns.apply_mapped_roles then
-          local ok, summary, errors = fns.apply_mapped_roles(strength_pct)
-          apply_report = summary or "Apply completed"
-          if errors and #errors > 0 then
-            apply_report = apply_report .. "\n" .. table.concat(errors, "\n")
-          end
-          if ok then
-            set_status("Auto EQ applied")
-            operation_done_msg = "Operation done: " .. os.date("%H:%M:%S")
-          else
-            set_status(summary or "Apply failed")
-            operation_done_msg = "Operation finished with issues: " .. os.date("%H:%M:%S")
-          end
-        end
-      end
-    else
-      reaper.ImGui_Spacing(ctx)
-      if freq_report then
-        reaper.ImGui_TextDisabled(ctx, "Run Generate Suggestions to enable Apply.")
-      else
-        reaper.ImGui_TextDisabled(ctx, "Analyze Frequency first, then Generate Suggestions.")
-      end
+      draw_stage_eq()
     end
 
     if operation_done_msg ~= "" then
-      reaper.ImGui_Spacing(ctx)
-      reaper.ImGui_Text(ctx, operation_done_msg)
+      safe_spacing()
+      safe_text(operation_done_msg)
     end
 
-    draw_bottom_row_controls()
     draw_update_popup()
 
-    if status_msg ~= "" and reaper.time_precise() < status_expiry then
-      reaper.ImGui_Text(ctx, status_msg)
+    -- Close the scrolling region before the footer. EndChild only when the
+    -- child actually opened -- see the note in safe_draw_child.
+    if body_drawn then
+      pcall(function() reaper.ImGui_EndChild(ctx) end)
     end
+
+    draw_footer()
   end
 
   reaper.ImGui_End(ctx)
@@ -1215,6 +1688,52 @@ function M.loop()
   end
 
   return true
+end
+
+-- Consecutive frames that threw. A context that cannot be rebuilt should close
+-- the window rather than spin forever recreating itself.
+local frame_errors = 0
+local MAX_FRAME_ERRORS = 10
+
+function M.loop()
+  if not ctx then return false end
+
+  -- Domain work, no ImGui: guarded separately so an analysis error does not
+  -- get mistaken for a dead context.
+  pcall(step_frequency_analysis_job)
+  pcall(step_eq_apply_job)
+
+  debug_frame = debug_frame + 1
+  dbg("=== frame begin ===")
+
+  -- xpcall so the traceback survives: knowing which call threw is the whole
+  -- point of this log.
+  local ok, keep_open = xpcall(draw_frame, function(err)
+    return tostring(err) .. "\n" .. debug.traceback("", 2)
+  end)
+  dbg("=== frame end ok=" .. tostring(ok) .. " ===")
+
+  -- Outside the frame: safe for Reaper to redraw its own windows now.
+  run_pending_action()
+
+  if ok then
+    frame_errors = 0
+    return keep_open
+  end
+
+  dbg("FRAME THREW: " .. tostring(keep_open))
+  dbg_flush("draw_frame threw")
+
+  -- Discard the half-drawn frame and rebuild. ImGui state is unbalanced at this
+  -- point (Begin without End), and a fresh context is the only clean recovery.
+  frame_errors = frame_errors + 1
+  if frame_errors >= MAX_FRAME_ERRORS then
+    return false
+  end
+
+  ctx = reaper.ImGui_CreateContext("MixGuideEQ")
+  set_status("Window rebuilt after a graphics error (" .. tostring(keep_open) .. ")")
+  return ctx ~= nil
 end
 
 return M

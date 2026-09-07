@@ -1,4 +1,4 @@
-# MixGuideEQ v0.46.2
+# MixGuideEQ v0.46.3
 
 > **Status: the EQ stage is not ready.** Mapping, pan and level balancing are in
 > usable shape. Auto EQ is still producing mixes that come out too quiet, across
@@ -270,3 +270,5 @@ Tip: Do one mapping pass first, then run analysis. If you remap many tracks, re-
 122. A track losing more than 3 dB to its EQ is named in the apply summary even though the level came back, so makeup gain cannot hide a filter landing in the wrong place
 123. The Preview bar number is remembered per project instead of resetting to 1 on every panel open
 124. Analyze Frequency now actually performs the revert that feature 116 describes. The Levels and Pan buttons undid the stages after them; the EQ one never did, so a re-analysis measured a mix still carrying this panel's pan, level and makeup moves
+125. Apply Level Balance logs every fader it writes - what the plan asked for, the fader before and after, what was actually achieved, and a CLAMPED marker when the write could not take the whole move. A track landing wrong can now be traced to the plan or to the write, which need opposite fixes
+126. Analysis log sections nest, so one operation leaves one log. Apply Level Balance re-measures afterwards, and that pass used to overwrite the plan that produced the moves - leaving only the post-apply reading, the least useful of the three

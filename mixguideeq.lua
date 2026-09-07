@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.46.2
+-- @version 0.46.3
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.46.2",
+  version = "0.46.3",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
@@ -2146,6 +2146,7 @@ end
 -- track by a known amount and see whether the reading follows.
 --
 -- Cached for the session -- it is a property of the build, not the project.
+local analysis_log_depth = 0
 local accessor_fader_mode = nil
 
 local function accessor_includes_fader(track)
@@ -2175,6 +2176,15 @@ end
 local analysis_log_lines = nil
 
 function alog_begin(title)
+  -- An operation that runs an analysis inside itself gets one log, not three
+  -- that each overwrite the last. Only the outermost section writes the file.
+  if analysis_log_lines and analysis_log_depth > 0 then
+    analysis_log_depth = analysis_log_depth + 1
+    analysis_log_lines[#analysis_log_lines + 1] = ""
+    analysis_log_lines[#analysis_log_lines + 1] = "=== " .. tostring(title) .. " ==="
+    return
+  end
+  analysis_log_depth = 1
   analysis_log_lines = {
     "MixGuideEQ analysis log",
     "written: " .. os.date("%Y-%m-%d %H:%M:%S"),
@@ -2196,6 +2206,8 @@ end
 
 function alog_end()
   if not analysis_log_lines then return end
+  analysis_log_depth = analysis_log_depth - 1
+  if analysis_log_depth > 0 then return end
   local lines = analysis_log_lines
   analysis_log_lines = nil
   pcall(function()
@@ -2891,8 +2903,11 @@ local function revert_last_pan_balance()
 end
 
 local function apply_volume_balance(profile_name)
+  alog_begin("Apply Level Balance")
   local report = analyze_volume_report(profile_name)
   if not report then
+    alog("no volume report; nothing applied")
+    alog_end()
     return false, "No volume report available.", {}
   end
 
@@ -2900,6 +2915,9 @@ local function apply_volume_balance(profile_name)
   -- strand the earlier apply with no way back, so refuse instead.
   local existing = app.last_volume_apply_snapshot
   if existing and existing.tracks and #existing.tracks > 0 then
+    alogf("refused: an unreverted %s snapshot covering %d track(s) is still in place",
+      tostring(existing.profile), #existing.tracks)
+    alog_end()
     return false,
       "A previous level apply (" .. tostring(existing.profile)
         .. ") has not been reverted. Revert it first, or the two trims stack "
@@ -2931,6 +2949,25 @@ local function apply_volume_balance(profile_name)
     end
   end
 
+  -- What the plan asked for against what the fader could actually take. A
+  -- clamped write is the difference between "the plan was wrong" and "the plan
+  -- was right and only half of it landed", and those need opposite fixes.
+  alog("")
+  alogf("writes (anything under %.2f dB is left alone)", MIN_APPLY_DELTA_DB)
+  alogf("%-28s %8s %9s %9s %8s  %s",
+    "TRACK", "want", "fader in", "fader out", "got", "note")
+
+  local function log_write(label, wanted_db, before_vol, after_vol)
+    local got_db = vol_to_db(after_vol) - vol_to_db(before_vol)
+    local note = ""
+    if math.abs(got_db - wanted_db) > 0.05 then
+      note = string.format("CLAMPED, %.2f dB short", wanted_db - got_db)
+    end
+    alogf("%-28s %+8.2f %+9.2f %+9.2f %+8.2f  %s",
+      tostring(label), wanted_db, vol_to_db(before_vol), vol_to_db(after_vol),
+      got_db, note)
+  end
+
   reaper.Undo_BeginBlock()
   local apply_ok, apply_err = pcall(function()
     for _, action in ipairs(report.track_adjustments or {}) do
@@ -2940,9 +2977,11 @@ local function apply_volume_balance(profile_name)
           local current_vol = reaper.GetMediaTrackInfo_Value(track, "D_VOL") or 1.0
           local next_vol = clamp(current_vol * db_to_vol(action.delta_db), MIN_TRACK_VOL, MAX_TRACK_VOL)
           reaper.SetMediaTrackInfo_Value(track, "D_VOL", next_vol)
+          log_write(action.name, action.delta_db, current_vol, next_vol)
           applied_track_adjustments = applied_track_adjustments + 1
         else
           errors[#errors + 1] = tostring(action.name) .. ": track not found for child adjustment"
+          alogf("%-28s SKIPPED, track not found", tostring(action.name))
         end
       end
     end
@@ -2957,6 +2996,7 @@ local function apply_volume_balance(profile_name)
             local current_vol = reaper.GetMediaTrackInfo_Value(root_track, "D_VOL") or 1.0
             local next_vol = clamp(current_vol * db_to_vol(action.delta_db), MIN_TRACK_VOL, MAX_TRACK_VOL)
             reaper.SetMediaTrackInfo_Value(root_track, "D_VOL", next_vol)
+            log_write("[root] " .. tostring(action.root_name), action.delta_db, current_vol, next_vol)
             applied_root_adjustments = applied_root_adjustments + 1
           else
             errors[#errors + 1] = tostring(action.root_name) .. ": root track not found"
@@ -3002,7 +3042,15 @@ local function apply_volume_balance(profile_name)
 
   summary = summary .. " Snapshot captured for " .. tostring(#snapshot_list) .. " track(s)."
 
+  for _, err in ipairs(errors) do
+    alogf("ISSUE    %s", tostring(err))
+  end
+  alogf("summary: %s", summary)
+
+  -- Re-measured so the panel shows where the mix landed, not where it started.
+  -- Nested, so this does not overwrite the plan that produced the writes.
   local refreshed_report = analyze_volume_report(report.profile)
+  alog_end()
   return true, summary, errors, refreshed_report
 end
 

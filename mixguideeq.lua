@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.46.4
+-- @version 0.46.5
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.46.4",
+  version = "0.46.5",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
@@ -51,6 +51,14 @@ local MAX_ROOT_DELTA_DB = 6.0
 local RMS_SILENCE_GATE = 1e-4
 -- Headroom the level plan leaves below full scale.
 local PEAK_CEILING_DB = -1.0
+-- A share of its role's energy is not enough on its own: in a four-track role
+-- one loud track holds nearly half of it legitimately. What matters is the
+-- share measured against an even one, so this is a multiple: 3.0 means a track
+-- carrying three times what an even split would give it. The kit stem that
+-- prompted this sat at 3.4 across ten tracks; a kick 3 dB above a nine-mic kit
+-- sits at 1.8.
+local STEM_CONCENTRATION = 3.0
+local STEM_MIN_ROLE_TRACKS = 4
 -- An EQ that costs a track more than this much level is doing something other
 -- than shaping it. Makeup gain hides the symptom, so the threshold is low
 -- enough to still name the track in the summary.
@@ -2345,6 +2353,22 @@ local function analyze_volume_report(profile_name)
     ABSOLUTE_GATE_DB, RELATIVE_GATE_DB, LEVEL_BLOCK_COUNT, LEVEL_BLOCK_SAMPLES,
     LEVEL_SAMPLE_RATE)
 
+  -- A muted track is not in the mix: it must not be measured, must not be
+  -- counted into its role's combined level, and must not be written to. A
+  -- muted folder takes its children with it.
+  local function muted_reason(item, track)
+    if track and (reaper.GetMediaTrackInfo_Value(track, "B_MUTE") or 0) > 0.5 then
+      return "muted"
+    end
+    if item.root_guid and item.root_guid ~= item.guid then
+      local root_track = get_track_by_guid(item.root_guid)
+      if root_track and (reaper.GetMediaTrackInfo_Value(root_track, "B_MUTE") or 0) > 0.5 then
+        return "inside a muted folder"
+      end
+    end
+    return nil
+  end
+
   local function inherited_gain_db(item)
     if not item.root_guid or item.root_guid == item.guid then return 0.0 end
     local root_track = get_track_by_guid(item.root_guid)
@@ -2363,8 +2387,13 @@ local function analyze_volume_report(profile_name)
         skipped_count = skipped_count + 1
       else
         local track = get_track_by_guid(item.guid)
-        local levels = track and measure_track_levels(track)
-        if not track or not levels then
+        local muted = track and muted_reason(item, track)
+        local levels = (track and not muted) and measure_track_levels(track)
+        if muted then
+          skipped_count = skipped_count + 1
+          alogf("SKIPPED  %-28s role=%-7s reason=%s", tostring(item.display_name),
+            tostring(role), muted)
+        elseif not track or not levels then
           skipped_count = skipped_count + 1
           alogf("SKIPPED  %-28s role=%-7s reason=%s", tostring(item.display_name),
             tostring(role), track and "no audio above the gate" or "track not found")
@@ -2435,6 +2464,44 @@ local function analyze_volume_report(profile_name)
     end
     role_sum_db[role] = 10.0 * (math.log(power) / math.log(10.0))
     role_heard_mean[role] = heard_total / #role_members[role]
+  end
+
+  -- Roles are placed by their combined energy, which is what the mix bus does
+  -- -- correct only while each track is a separate contribution. A stem or sum
+  -- of the same instrument counts it twice, and the role then reads far louder
+  -- than it sounds and gets cut for it. A real project had a 10-track kit
+  -- carrying a whole-kit mix alongside the individual mics: drums measured
+  -- 15.8 dB above the bass and were cut 7.4 dB for it.
+  --
+  -- Whether two tracks are the same sound is a question about the project, not
+  -- something to guess at, so this names the suspect and leaves the call to
+  -- whoever knows what the track is. A track holding about as much energy as
+  -- every other track in its role put together is the signature.
+  -- This reports a concentration, it does not detect a stem. Energy alone
+  -- cannot tell a whole-kit mix from a very loud kick -- what separates them is
+  -- that a stem correlates with the sum of the others, which is not measured
+  -- here. So the threshold sits where the number is worth a look on its own
+  -- terms, and the note asks rather than acts.
+  local stem_notes = {}
+  for _, role in ipairs(role_order) do
+    local members = role_members[role]
+    if #members >= STEM_MIN_ROLE_TRACKS then
+      local total_power = 10.0 ^ (role_sum_db[role] / 10.0)
+      for _, row in ipairs(members) do
+        local share = (10.0 ^ (row.heard_db / 10.0)) / total_power
+        if (share * #members) >= STEM_CONCENTRATION then
+          local note = string.format(
+            "%s holds %.0f%% of the %s total on its own across %d track(s) - "
+            .. "%.1fx an even share. If it is a stem or sum of the same source, "
+            .. "exclude it or the tracks it duplicates: counting both makes %s "
+            .. "read louder than it sounds and the whole role gets cut for it.",
+            tostring(row.name), share * 100, tostring(role), #members,
+            share * #members, tostring(role))
+          stem_notes[#stem_notes + 1] = note
+          alogf("CHECK    %s", note)
+        end
+      end
+    end
   end
 
   -- Role offsets, zero-meaned across the roles actually present, so the mix
@@ -2614,9 +2681,13 @@ local function analyze_volume_report(profile_name)
     total_nonzero = total_nonzero,
     excluded_track_count = excluded_count,
     skipped_track_count = skipped_count,
+    stem_notes = stem_notes,
     summary = string.format(
-      "Levels (%s): %d track(s) measured, %d move(s). Loudest %.1f dB.",
-      profile.name, #measured, total_nonzero, loudest_db
+      "Levels (%s): %d track(s) measured, %d move(s). Loudest %.1f dB.%s",
+      profile.name, #measured, total_nonzero, loudest_db,
+      (#stem_notes > 0)
+        and (" " .. tostring(#stem_notes) .. " track(s) worth checking for a double count - see the report.")
+        or ""
     ),
   }
 end

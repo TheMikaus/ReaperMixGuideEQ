@@ -961,6 +961,15 @@ local function draw_volume_report()
   safe_separator()
   safe_text("Levels (profile: " .. tostring(volume_report.profile or volume_profile) .. ")")
   safe_text_wrapped(tostring(volume_report.summary or ""))
+
+  -- Roles are placed by combined energy, so a stem counted alongside the
+  -- tracks it is made of makes its whole role read louder than it sounds.
+  -- Whether two tracks are the same source is a question about the project,
+  -- so this asks rather than deciding.
+  for _, note in ipairs(volume_report.stem_notes or {}) do
+    safe_spacing()
+    safe_text_wrapped("Possible double count: " .. tostring(note))
+  end
   safe_text("Averages exclude silence (gated). Stereo measured as mono. "
     .. "Values are relative to the loudest track.", true)
   safe_spacing()

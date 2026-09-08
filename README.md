@@ -1,4 +1,4 @@
-# MixGuideEQ v0.46.4
+# MixGuideEQ v0.46.5
 
 > **Status: the EQ stage is not ready.** Mapping, pan and level balancing are in
 > usable shape. Auto EQ is still producing mixes that come out too quiet, across
@@ -274,3 +274,5 @@ Tip: Do one mapping pass first, then run analysis. If you remap many tracks, re-
 126. Analysis log sections nest, so one operation leaves one log. Apply Level Balance re-measures afterwards, and that pass used to overwrite the plan that produced the moves - leaving only the post-apply reading, the least useful of the three
 127. The clip guard trims only the track that would cross the ceiling, instead of taking the excess off every move. Protecting one hot track used to cost the whole project - a real pass lost 2.93 dB across the board, undoing the zero-mean applied one step earlier. A track only clips itself, and a track being cut cannot clip at all
 128. Collapsing the window no longer kills the panel. On this ReaImGui build a collapsed window's Begin returns false without pushing, so End must be skipped, exactly as it is for a culled child
+129. Muted tracks are out of the level stage entirely - not measured, not counted into their role's combined level, and never written to. The tool read B_MUTE nowhere at all, so a muted track inflated its role and got a fader trim nobody could hear. A muted folder takes its children with it
+130. The levels report names any track holding an outsized share of its role - three times an even share or more. Roles are placed by combined energy, so a stem sitting beside the tracks it is made of counts the same source twice and the whole role gets cut for it. It reports rather than acts: energy cannot tell a kit stem from a loud kick, only the person who knows the project can

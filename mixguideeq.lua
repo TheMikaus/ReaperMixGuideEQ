@@ -1,6 +1,6 @@
 -- MixGuideEQ: Rule-driven Auto EQ assistant for Reaper
 -- @author ReaperAutomation
--- @version 0.46.5
+-- @version 0.46.6
 
 local function get_script_dir()
   local src = debug.getinfo(1).source
@@ -17,7 +17,7 @@ local ui = dofile(get_script_dir() .. "ui.lua")
 
 local app = {
   name = "MixGuideEQ",
-  version = "0.46.5",
+  version = "0.46.6",
   install_source_dir = "",
   track_roles = {},
   track_excluded = {},
@@ -2378,6 +2378,9 @@ local function analyze_volume_report(profile_name)
 
   local measured = {}
   local excluded_count, skipped_count = 0, 0
+  -- Whether the accessor reads before the fader. Probed on the first track
+  -- that measures, cached for the session.
+  local accessor_pre_fader = nil
 
   for _, role in ipairs(get_roles_order()) do
     for _, item in ipairs(columns[role]) do
@@ -2403,6 +2406,23 @@ local function analyze_volume_report(profile_name)
           local child_offset, reason = get_child_balance_offset(role, item.name)
           local role_offset = (profile.role_offsets and profile.role_offsets[role]) or 0.0
 
+          if accessor_pre_fader == nil then
+            accessor_pre_fader = not accessor_includes_fader(track)
+            alogf("accessor reads %s the fader%s",
+              accessor_pre_fader and "BEFORE" or "AFTER",
+              accessor_pre_fader
+                and "; each track's own fader is added to its measurement"
+                or "; measurements already carry the fader")
+          end
+
+          -- What the listener hears: the measurement, plus this track's own
+          -- fader when the accessor does not already include it, plus the
+          -- folder's. Every comparison below is between heard levels. The
+          -- own-fader term was missing, so a track sitting at +6 dB was
+          -- planned as if it sat at 0 and pushed 6 dB too far.
+          local fader_offset_db = accessor_pre_fader and fader_db or 0.0
+          local inherited_db = inherited_gain_db(item)
+
           measured[#measured + 1] = {
             guid = item.guid,
             name = item.display_name,
@@ -2413,9 +2433,13 @@ local function analyze_volume_report(profile_name)
             peak_db = levels.peak_db,
             blocks = levels.blocks,
             current_db = fader_db,
+            fader_offset_db = fader_offset_db,
+            heard_db = levels.avg_db + fader_offset_db + inherited_db,
+            heard_max_db = levels.max_db + fader_offset_db + inherited_db,
+            heard_peak_db = (levels.peak_db or levels.max_db) + fader_offset_db + inherited_db,
             pan = pan,
             pan_relief_db = get_pan_relief_db(profile, role, pan),
-            inherited_db = inherited_gain_db(item),
+            inherited_db = inherited_db,
             -- Where the profile says this track should sit relative to the rest.
             target_rel_db = role_offset + child_offset,
             child_reason = reason,
@@ -2431,9 +2455,9 @@ local function analyze_volume_report(profile_name)
     return nil
   end
 
-  -- Loudest first. This ordering is the report.
-  table.sort(measured, function(a, b) return a.avg_db > b.avg_db end)
-  local loudest_db = measured[1].avg_db
+  -- Loudest first, as heard. This ordering is the report.
+  table.sort(measured, function(a, b) return a.heard_db > b.heard_db end)
+  local loudest_db = measured[1].heard_db
 
   -- ── role sums ─────────────────────────────────────────────────────────────
   --
@@ -2444,8 +2468,6 @@ local function analyze_volume_report(profile_name)
   local role_members = {}
   local role_order = {}
   for _, row in ipairs(measured) do
-    local heard = row.avg_db + row.inherited_db
-    row.heard_db = heard
     if not role_members[row.role] then
       role_members[row.role] = {}
       role_order[#role_order + 1] = row.role
@@ -2540,8 +2562,8 @@ local function analyze_volume_report(profile_name)
 
   for rank, row in ipairs(measured) do
     row.rank = rank
-    row.rel_avg_db = row.avg_db - loudest_db
-    row.rel_max_db = row.max_db - loudest_db
+    row.rel_avg_db = row.heard_db - loudest_db
+    row.rel_max_db = row.heard_max_db - loudest_db
 
     local heard = row.heard_db
     local want = row.target_rel_db + (row.pan_relief_db or 0.0)
@@ -2554,7 +2576,7 @@ local function analyze_volume_report(profile_name)
     end
 
     row.delta_db = delta_db
-    row.target_db = row.avg_db + delta_db
+    row.target_db = row.heard_db + delta_db
     if delta_db ~= 0.0 then
       total_nonzero = total_nonzero + 1
     end
@@ -2565,6 +2587,7 @@ local function analyze_volume_report(profile_name)
       name = row.name,
       current_db = row.current_db,
       avg_db = row.avg_db,
+      heard_db = row.heard_db,
       max_db = row.max_db,
       target_db = row.target_db,
       delta_db = delta_db,
@@ -2584,7 +2607,7 @@ local function analyze_volume_report(profile_name)
   if math.abs(move_mean) >= MIN_APPLY_DELTA_DB then
     for _, row in ipairs(measured) do
       row.delta_db = row.delta_db - move_mean
-      row.target_db = row.avg_db + row.delta_db
+      row.target_db = row.heard_db + row.delta_db
     end
     for _, action in ipairs(track_adjustments) do
       action.delta_db = action.delta_db - move_mean
@@ -2611,18 +2634,18 @@ local function analyze_volume_report(profile_name)
   -- for it on every other track in the project.
   local predicted_peak = -math.huge
   for _, row in ipairs(measured) do
-    local peak = (row.peak_db or row.max_db) + row.delta_db + row.inherited_db
+    local peak = row.heard_peak_db + row.delta_db
     if peak > predicted_peak then predicted_peak = peak end
   end
 
   local clip_trims = {}
   local clip_trim_db = 0.0
   for _, row in ipairs(measured) do
-    local peak = (row.peak_db or row.max_db) + row.delta_db + row.inherited_db
+    local peak = row.heard_peak_db + row.delta_db
     if peak > PEAK_CEILING_DB then
       local trim = PEAK_CEILING_DB - peak
       row.delta_db = row.delta_db + trim
-      row.target_db = row.avg_db + row.delta_db
+      row.target_db = row.heard_db + row.delta_db
       clip_trims[tostring(row.guid)] = trim
       -- The deepest single trim, for the report.
       if trim < clip_trim_db then clip_trim_db = trim end
@@ -2655,11 +2678,12 @@ local function analyze_volume_report(profile_name)
     row.target_rank = target_rank
   end
 
-  alogf("%-28s %8s %8s %8s %8s %8s", "TRACK", "avg", "max", "peak", "fader", "move")
+  alogf("%-28s %8s %8s %8s %8s %8s %8s", "TRACK", "measured", "fader", "folder",
+    "heard", "peak", "move")
   for _, row in ipairs(measured) do
-    alogf("%-28s %8.2f %8.2f %8.2f %8.2f %8.2f  %s",
-      tostring(row.name), row.avg_db, row.max_db, row.peak_db or 0,
-      row.current_db, row.delta_db, tostring(row.child_reason or ""))
+    alogf("%-28s %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f  %s",
+      tostring(row.name), row.avg_db, row.current_db, row.inherited_db,
+      row.heard_db, row.heard_peak_db, row.delta_db, tostring(row.child_reason or ""))
   end
   alogf("mean move %.3f dB (zero means the mix level is preserved)",
     (function()

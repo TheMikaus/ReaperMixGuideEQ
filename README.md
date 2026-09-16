@@ -1,4 +1,4 @@
-# MixGuideEQ v0.46.5
+# MixGuideEQ v0.46.6
 
 > **Status: the EQ stage is not ready.** Mapping, pan and level balancing are in
 > usable shape. Auto EQ is still producing mixes that come out too quiet, across
@@ -276,3 +276,4 @@ Tip: Do one mapping pass first, then run analysis. If you remap many tracks, re-
 128. Collapsing the window no longer kills the panel. On this ReaImGui build a collapsed window's Begin returns false without pushing, so End must be skipped, exactly as it is for a culled child
 129. Muted tracks are out of the level stage entirely - not measured, not counted into their role's combined level, and never written to. The tool read B_MUTE nowhere at all, so a muted track inflated its role and got a fader trim nobody could hear. A muted folder takes its children with it
 130. The levels report names any track holding an outsized share of its role - three times an even share or more. Roles are placed by combined energy, so a stem sitting beside the tracks it is made of counts the same source twice and the whole role gets cut for it. It reports rather than acts: energy cannot tell a kit stem from a loud kick, only the person who knows the project can
+131. The level plan now sees each track's own fader. The accessor probe existed but was never called, and the heard level was the measurement plus the folder's fader only - so on a build that reads before the fader, every track was planned as if it sat at 0 dB. A bass already at +6.5 dB was pushed to +12 for it, and measuring again after an apply asked for the identical moves a second time. The plan now converges: apply once, measure again, nothing left to move
